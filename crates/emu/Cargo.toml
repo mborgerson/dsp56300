@@ -1,0 +1,32 @@
+[package]
+name = "dsp56300-emu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+description = "DSP56300 JIT emulator"
+keywords = ["dsp56300", "motorola", "emulator", "jit", "dsp"]
+categories = ["emulators"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[dependencies]
+dsp56300-core = { version = "0.1.0", path = "../core" }
+dsp56300-disasm = { version = "0.1.0", path = "../disasm", default-features = false }
+cranelift-codegen = "0.128"
+cranelift-frontend = "0.128"
+cranelift-jit = "0.128"
+cranelift-module = "0.128"
+cranelift-native = "0.128"
+target-lexicon = "0.13"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[[bin]]
+name = "dsp56300-emu"
+path = "src/bin/emu.rs"
+required-features = ["cli"]
