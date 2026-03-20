@@ -7,7 +7,7 @@
 //! - [`disasm`] - Disassembler (machine code to text)
 //! - [`emu`] - JIT emulator (Cranelift-based)
 
-pub use dsp56300_core as core;
 pub use dsp56300_asm as asm;
+pub use dsp56300_core as core;
 pub use dsp56300_disasm as disasm;
 pub use dsp56300_emu as emu;
