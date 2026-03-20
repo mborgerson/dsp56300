@@ -13,7 +13,7 @@ crate-type = ["staticlib"]
 
 [build-dependencies]
 cc = "1"
-cbindgen = "0.28"
+cbindgen = "0.29"
 
 [dependencies]
 dsp56300-core = { version = "0.1.0", path = "../core" }
