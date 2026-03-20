@@ -18,11 +18,11 @@ cli = ["dep:clap"]
 [dependencies]
 dsp56300-core = { version = "0.1.0", path = "../core" }
 dsp56300-disasm = { version = "0.1.0", path = "../disasm", default-features = false }
-cranelift-codegen = "0.128"
-cranelift-frontend = "0.128"
-cranelift-jit = "0.128"
-cranelift-module = "0.128"
-cranelift-native = "0.128"
+cranelift-codegen = "0.130"
+cranelift-frontend = "0.130"
+cranelift-jit = "0.130"
+cranelift-module = "0.130"
+cranelift-native = "0.130"
 target-lexicon = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }
 
