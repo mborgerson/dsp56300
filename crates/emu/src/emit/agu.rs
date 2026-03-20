@@ -150,7 +150,7 @@ impl<'a> Emitter<'a> {
             .builder
             .ins()
             .iconst(self.ptr_ty, jit_update_rn as *const () as usize as i64);
-        let mut sig = Signature::new(CallConv::SystemV);
+        let mut sig = Signature::new(HOST_CALL_CONV);
         sig.params.push(AbiParam::new(self.ptr_ty)); // *mut DspState
         sig.params.push(AbiParam::new(types::I32)); // numreg
         sig.params.push(AbiParam::new(types::I32)); // modifier (i16 sign-extended to i32)

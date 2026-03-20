@@ -90,7 +90,7 @@ impl<'a> Emitter<'a> {
             .builder
             .ins()
             .iconst(self.ptr_ty, opaque as usize as i64);
-        let mut sig = Signature::new(CallConv::SystemV);
+        let mut sig = Signature::new(HOST_CALL_CONV);
         sig.params.push(AbiParam::new(self.ptr_ty)); // opaque
         sig.params.push(AbiParam::new(types::I32)); // address
         sig.returns.push(AbiParam::new(types::I32)); // return
@@ -119,7 +119,7 @@ impl<'a> Emitter<'a> {
             .builder
             .ins()
             .iconst(self.ptr_ty, opaque as usize as i64);
-        let mut sig = Signature::new(CallConv::SystemV);
+        let mut sig = Signature::new(HOST_CALL_CONV);
         sig.params.push(AbiParam::new(self.ptr_ty)); // opaque
         sig.params.push(AbiParam::new(types::I32)); // address
         sig.params.push(AbiParam::new(types::I32)); // value
@@ -285,7 +285,7 @@ impl<'a> Emitter<'a> {
                 .builder
                 .ins()
                 .iconst(types::I32, MemSpace::P as u32 as i64);
-            let mut sig = Signature::new(CallConv::SystemV);
+            let mut sig = Signature::new(HOST_CALL_CONV);
             sig.params.push(AbiParam::new(self.ptr_ty));
             sig.params.push(AbiParam::new(types::I32));
             sig.params.push(AbiParam::new(types::I32));

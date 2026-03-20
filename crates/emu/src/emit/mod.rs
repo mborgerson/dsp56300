@@ -13,6 +13,14 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, Variable};
 
+/// The calling convention used by `extern "C"` functions on the host platform.
+#[cfg(target_os = "windows")]
+const HOST_CALL_CONV: CallConv = CallConv::WindowsFastcall;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const HOST_CALL_CONV: CallConv = CallConv::AppleAarch64;
+#[cfg(not(any(target_os = "windows", all(target_os = "macos", target_arch = "aarch64"))))]
+const HOST_CALL_CONV: CallConv = CallConv::SystemV;
+
 use crate::core::{
     DspState, InterruptState, MemSpace, MemoryMap, PowerState, RegionKind, interrupt, jit_read_ssh,
     jit_rnd56, jit_update_rn, jit_write_mem, jit_write_sp, jit_write_ssh, jit_write_ssl, reg, sr,
@@ -1729,7 +1737,7 @@ impl<'a> Emitter<'a> {
     fn emit_call_extern_val(&mut self, fn_addr: usize, val: Value) {
         self.flush_promoted();
         let fn_ptr = self.builder.ins().iconst(self.ptr_ty, fn_addr as i64);
-        let mut sig = Signature::new(CallConv::SystemV);
+        let mut sig = Signature::new(HOST_CALL_CONV);
         sig.params.push(AbiParam::new(self.ptr_ty)); // *mut DspState
         sig.params.push(AbiParam::new(types::I32)); // value
         let sig_ref = self.builder.import_signature(sig);
@@ -1744,7 +1752,7 @@ impl<'a> Emitter<'a> {
     fn emit_call_extern_ret(&mut self, fn_addr: usize) -> Value {
         self.flush_promoted();
         let fn_ptr = self.builder.ins().iconst(self.ptr_ty, fn_addr as i64);
-        let mut sig = Signature::new(CallConv::SystemV);
+        let mut sig = Signature::new(HOST_CALL_CONV);
         sig.params.push(AbiParam::new(self.ptr_ty)); // *mut DspState
         sig.returns.push(AbiParam::new(types::I32)); // return u32
         let sig_ref = self.builder.import_signature(sig);
