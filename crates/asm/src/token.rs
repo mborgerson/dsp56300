@@ -11,13 +11,13 @@ use std::fmt;
 #[logos(skip r"[ \t]+")]
 pub enum Token {
     // --- Memory space prefixes (must come before identifiers) ---
-    #[token("x:", ignore(ascii_case))]
+    #[token("x:", ignore(case))]
     XMem,
-    #[token("y:", ignore(ascii_case))]
+    #[token("y:", ignore(case))]
     YMem,
-    #[token("p:", ignore(ascii_case))]
+    #[token("p:", ignore(case))]
     PMem,
-    #[token("l:", ignore(ascii_case))]
+    #[token("l:", ignore(case))]
     LMem,
 
     // --- Hex literal: $xxxx ---
@@ -76,7 +76,7 @@ pub enum Token {
     NewlineCrLf,
 
     // --- Comment (;...) ---
-    #[regex(r";[^\n]*")]
+    #[regex(r";[^\n]*", allow_greedy = true)]
     Comment,
 
     // --- Identifier (label, mnemonic, register name) ---
