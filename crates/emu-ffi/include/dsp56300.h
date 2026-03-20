@@ -12,6 +12,15 @@
 #include <stdint.h>
 
 /**
+ * Region kind tag for C FFI.
+ */
+enum Dsp56300Region {
+  DSP56300_REGION_BUFFER = 0,
+  DSP56300_REGION_CALLBACK = 1,
+};
+typedef uint32_t Dsp56300Region;
+
+/**
  * FFI-safe memory space enum.
  */
 enum Dsp56300MemSpace {
@@ -73,15 +82,6 @@ enum Dsp56300Reg {
   DSP56300_REG_COUNT = 64,
 };
 typedef uint32_t Dsp56300Reg;
-
-/**
- * Region kind tag for C FFI.
- */
-enum Dsp56300Region {
-  DSP56300_REGION_BUFFER = 0,
-  DSP56300_REGION_CALLBACK = 1,
-};
-typedef uint32_t Dsp56300Region;
 
 /**
  * Opaque handle to a DSP instance with JIT engine.
