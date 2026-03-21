@@ -1,6 +1,8 @@
 Motorola DSP56300 Toolkit
 =========================
 
+[![codecov](https://codecov.io/gh/mborgerson/dsp56300/graph/badge.svg?token=EV4KQIYH1R)](https://codecov.io/gh/mborgerson/dsp56300)
+
 A toolkit for working with the Motorola (Freescale/NXP) DSP56300 family of digital signal processors, including an assembler, disassembler, and emulator.
 
 Crates
