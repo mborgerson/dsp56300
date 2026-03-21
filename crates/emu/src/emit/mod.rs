@@ -18,7 +18,10 @@ use cranelift_frontend::{FunctionBuilder, Variable};
 const HOST_CALL_CONV: CallConv = CallConv::WindowsFastcall;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const HOST_CALL_CONV: CallConv = CallConv::AppleAarch64;
-#[cfg(not(any(target_os = "windows", all(target_os = "macos", target_arch = "aarch64"))))]
+#[cfg(not(any(
+    target_os = "windows",
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 const HOST_CALL_CONV: CallConv = CallConv::SystemV;
 
 use crate::core::{
