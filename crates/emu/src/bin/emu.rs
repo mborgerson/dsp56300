@@ -22,7 +22,11 @@ use dsp56300_emu::jit::JitEngine;
 type SymbolTable = HashMap<String, u32>;
 
 #[derive(Parser)]
-#[command(name = "dsp56300-emu", about = "DSP56300 audio effect processor")]
+#[command(
+    name = "dsp56300-emu",
+    version,
+    about = "DSP56300 audio effect processor"
+)]
 struct Args {
     /// Program file in LOD format ("S AAAA WWWWWW" per word, "I AAAA name" for symbols)
     program: PathBuf,
