@@ -81,7 +81,8 @@ pub struct JitEngine {
     /// Cache for single-instruction compilation (used by execute_one).
     /// Key: (pc, opcode, next_word) -> (compiled function, instruction length).
     instr_cache: HashMap<(u32, u32, u32), (CompiledFn, u32)>,
-    /// Perf map file for profiling JIT blocks with `perf record`.
+    /// Perf map file for profiling JIT blocks with `perf record` (Linux only).
+    #[cfg(target_os = "linux")]
     perf_map: Option<std::fs::File>,
     /// Number of PRAM words (determines cache and profile array sizes).
     pram_size: usize,
@@ -103,6 +104,7 @@ impl JitEngine {
             ptr_ty,
             cache: CodeCache::new(pram_size),
             instr_cache: HashMap::new(),
+            #[cfg(target_os = "linux")]
             perf_map: None,
             pram_size,
             block_profile: None,
@@ -123,14 +125,19 @@ impl JitEngine {
         JITModule::new(builder)
     }
 
-    /// Enable perf map output for `perf record` profiling.
+    /// Enable perf map output for `perf record` profiling (Linux only).
     /// Creates `/tmp/perf-<pid>.map`.
+    #[cfg(target_os = "linux")]
     pub fn enable_perf_map(&mut self) {
         if self.perf_map.is_none() {
             self.perf_map =
                 std::fs::File::create(format!("/tmp/perf-{}.map", std::process::id())).ok();
         }
     }
+
+    /// No-op on non-Linux platforms.
+    #[cfg(not(target_os = "linux"))]
+    pub fn enable_perf_map(&mut self) {}
 
     /// Enable block execution profiling (hit counts and cycle totals per PC).
     pub fn enable_profiling(&mut self) {
@@ -334,20 +341,22 @@ impl JitEngine {
     }
 
     /// Finalize the current Cranelift function and return a callable pointer.
-    fn finalize_function(&mut self, label: &str) -> CompiledFn {
+    fn finalize_function(&mut self, _label: &str) -> CompiledFn {
         let module = self.module.as_mut().unwrap();
         let func_id = module
             .declare_anonymous_function(&self.ctx.func.signature)
             .unwrap();
         module.define_function(func_id, &mut self.ctx).unwrap();
+        #[cfg(target_os = "linux")]
         let code_size = self.ctx.compiled_code().unwrap().code_buffer().len();
         module.clear_context(&mut self.ctx);
         module.finalize_definitions().unwrap();
 
         let code_ptr = module.get_finalized_function(func_id);
 
+        #[cfg(target_os = "linux")]
         if let Some(f) = &mut self.perf_map {
-            let _ = writeln!(f, "{:x} {:x} {}", code_ptr as usize, code_size, label);
+            let _ = writeln!(f, "{:x} {:x} {}", code_ptr as usize, code_size, _label);
         }
 
         // Safety: code_ptr points to JIT-compiled code with signature fn(*mut DspState) -> i32
@@ -683,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_perf_map() {
         let mut jit = JitEngine::new(PRAM_SIZE);
         jit.enable_perf_map();
@@ -708,6 +718,7 @@ mod tests {
     fn test_jit_engine_default() {
         let jit = JitEngine::default();
         assert!(!jit.is_profiling());
+        #[cfg(target_os = "linux")]
         assert!(jit.perf_map.is_none());
     }
 }

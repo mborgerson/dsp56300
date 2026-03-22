@@ -1022,15 +1022,15 @@ fn test_dump_profile() {
     s.run(&mut jit, 10);
 
     // Dump to a temp file and verify it contains expected content.
-    let path = "/tmp/dsp56300_test_profile.txt";
-    jit.dump_profile(&s.map, path);
+    let path = std::env::temp_dir().join("dsp56300_test_profile.txt");
+    jit.dump_profile(&s.map, path.to_str().unwrap());
 
-    let contents = std::fs::read_to_string(path).unwrap();
+    let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("hits"));
     assert!(contents.contains("total_cycles"));
     assert!(contents.contains("DISASSEMBLY OF TOP 20 BLOCKS"));
     assert!(contents.contains("0000.."));
-    std::fs::remove_file(path).ok();
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]
