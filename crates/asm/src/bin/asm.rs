@@ -12,7 +12,7 @@ use clap::{Parser, ValueEnum};
 use dsp56300_asm::{assemble_with_include_dirs, format_listing};
 
 #[derive(Parser)]
-#[command(name = "dsp56300-asm", about = "DSP56300 assembler")]
+#[command(name = "dsp56300-asm", version, about = "DSP56300 assembler")]
 struct Args {
     /// Input assembly file (default: stdin)
     file: Option<PathBuf>,
