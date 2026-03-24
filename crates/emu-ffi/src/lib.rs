@@ -235,9 +235,9 @@ pub unsafe extern "C" fn dsp56300_destroy(dsp: *mut DspJit) {
 pub unsafe extern "C" fn dsp56300_dump_profile(dsp: *mut DspJit, path: *const std::ffi::c_char) {
     let dsp = unsafe { &mut *dsp };
     dsp.jit.enable_profiling();
-    let path = unsafe { std::ffi::CStr::from_ptr(path) }
-        .to_str()
-        .unwrap_or("/tmp/dsp_profile.txt");
+    let path = unsafe { std::ffi::CStr::from_ptr(path) }.to_str();
+    let fallback = std::env::temp_dir().join("dsp_profile.txt");
+    let path = path.unwrap_or_else(|_| fallback.to_str().unwrap());
     dsp.jit.dump_profile(&dsp.state.map, path);
 }
 
@@ -840,13 +840,14 @@ mod tests {
             dsp56300_run(dsp, 10);
 
             // Dump profile to temp file
-            let path = std::ffi::CString::new("/tmp/dsp_test_profile.txt").unwrap();
+            let tmp = std::env::temp_dir().join("dsp_test_profile.txt");
+            let path = std::ffi::CString::new(tmp.to_str().unwrap()).unwrap();
             dsp56300_dump_profile(dsp, path.as_ptr());
 
             // Verify file was created
-            let contents = std::fs::read_to_string("/tmp/dsp_test_profile.txt").unwrap();
+            let contents = std::fs::read_to_string(&tmp).unwrap();
             assert!(!contents.is_empty());
-            std::fs::remove_file("/tmp/dsp_test_profile.txt").ok();
+            std::fs::remove_file(&tmp).ok();
 
             dsp56300_destroy(dsp);
         }
