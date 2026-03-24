@@ -17,7 +17,7 @@ use owo_colors::{OwoColorize, Style};
 use dsp56300_disasm::{SymbolTable, disassemble_with_symbols};
 
 #[derive(Parser)]
-#[command(name = "dsp56300-disasm", about = "DSP56300 disassembler")]
+#[command(name = "dsp56300-disasm", version, about = "DSP56300 disassembler")]
 struct Args {
     /// Input binary or LOD file (default: stdin)
     file: Option<PathBuf>,
