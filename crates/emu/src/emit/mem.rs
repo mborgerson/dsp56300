@@ -176,6 +176,10 @@ impl<'a> Emitter<'a> {
     /// Generates a branch tree that checks each region at JIT compile time,
     /// inlining buffer loads and baking callback pointers as constants.
     /// Buffer regions skip flush/reload entirely.
+    ///
+    /// Optimizations for common memory layouts:
+    /// - Region starting at 0: skip the lower-bound check (just `addr < end`)
+    /// - Shared helpers for range check, read, and write reduce duplication
     pub(super) fn read_mem_dyn(&mut self, space: MemSpace, addr: Value) -> Value {
         let regions = self.map.regions(space).to_vec();
         if regions.is_empty() {
@@ -189,73 +193,27 @@ impl<'a> Emitter<'a> {
             self.flush_promoted();
         }
 
-        let n = regions.len();
-        let check_blocks: Vec<_> = (0..n).map(|_| self.builder.create_block()).collect();
-        let body_blocks: Vec<_> = (0..n).map(|_| self.builder.create_block()).collect();
-        let fallthrough_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
         self.builder.append_block_param(merge_block, types::I32);
 
-        self.builder.ins().jump(check_blocks[0], &[]);
+        for region in &regions {
+            let body_block = self.builder.create_block();
+            let next_block = self.builder.create_block();
 
-        for i in 0..n {
-            let region = &regions[i];
-            let next = if i + 1 < n {
-                check_blocks[i + 1]
-            } else {
-                fallthrough_block
-            };
+            self.emit_region_range_check(region, addr, body_block, next_block);
 
-            // Check block: range test
-            self.builder.switch_to_block(check_blocks[i]);
-            self.builder.seal_block(check_blocks[i]);
-            if region.start == 0 {
-                let lt_end =
-                    self.builder
-                        .ins()
-                        .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
-                self.builder
-                    .ins()
-                    .brif(lt_end, body_blocks[i], &[], next, &[]);
-            } else {
-                let ge_start = self.builder.ins().icmp_imm(
-                    IntCC::UnsignedGreaterThanOrEqual,
-                    addr,
-                    region.start as i64,
-                );
-                let lt_end =
-                    self.builder
-                        .ins()
-                        .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
-                let in_range = self.builder.ins().band(ge_start, lt_end);
-                self.builder
-                    .ins()
-                    .brif(in_range, body_blocks[i], &[], next, &[]);
-            }
+            self.builder.switch_to_block(body_block);
+            self.builder.seal_block(body_block);
+            let result = self.emit_region_read(region, addr);
+            self.builder
+                .ins()
+                .jump(merge_block, &[BlockArg::Value(result)]);
 
-            // Body block: dispatch by region kind
-            self.builder.switch_to_block(body_blocks[i]);
-            self.builder.seal_block(body_blocks[i]);
-            match region.kind {
-                RegionKind::Buffer { base, offset } => {
-                    let result = self.emit_buffer_load_dyn(base, region.start, offset, addr);
-                    self.builder
-                        .ins()
-                        .jump(merge_block, &[BlockArg::Value(result)]);
-                }
-                RegionKind::Callback {
-                    opaque, read_fn, ..
-                } => {
-                    let result = self.emit_callback_read_dyn(opaque, read_fn, addr);
-                    self.builder
-                        .ins()
-                        .jump(merge_block, &[BlockArg::Value(result)]);
-                }
-            }
+            self.builder.switch_to_block(next_block);
+            self.builder.seal_block(next_block);
         }
 
-        self.builder.switch_to_block(fallthrough_block);
-        self.builder.seal_block(fallthrough_block);
+        // Unmapped fallthrough: return 0
         let zero = self.builder.ins().iconst(types::I32, 0);
         self.builder
             .ins()
@@ -305,9 +263,7 @@ impl<'a> Emitter<'a> {
             return;
         }
 
-        // Mask to 24 bits
-        let mask = self.builder.ins().iconst(types::I32, 0x00FF_FFFF);
-        let masked = self.builder.ins().band(val, mask);
+        let masked = self.mask24(val);
 
         let has_callbacks = regions
             .iter()
@@ -316,72 +272,86 @@ impl<'a> Emitter<'a> {
             self.flush_promoted();
         }
 
-        let n = regions.len();
-        let check_blocks: Vec<_> = (0..n).map(|_| self.builder.create_block()).collect();
-        let body_blocks: Vec<_> = (0..n).map(|_| self.builder.create_block()).collect();
-        let fallthrough_block = self.builder.create_block();
         let merge_block = self.builder.create_block();
 
-        self.builder.ins().jump(check_blocks[0], &[]);
+        for region in &regions {
+            let body_block = self.builder.create_block();
+            let next_block = self.builder.create_block();
 
-        for i in 0..n {
-            let region = &regions[i];
-            let next = if i + 1 < n {
-                check_blocks[i + 1]
-            } else {
-                fallthrough_block
-            };
+            self.emit_region_range_check(region, addr, body_block, next_block);
 
-            self.builder.switch_to_block(check_blocks[i]);
-            self.builder.seal_block(check_blocks[i]);
-            if region.start == 0 {
-                let lt_end =
-                    self.builder
-                        .ins()
-                        .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
-                self.builder
-                    .ins()
-                    .brif(lt_end, body_blocks[i], &[], next, &[]);
-            } else {
-                let ge_start = self.builder.ins().icmp_imm(
-                    IntCC::UnsignedGreaterThanOrEqual,
-                    addr,
-                    region.start as i64,
-                );
-                let lt_end =
-                    self.builder
-                        .ins()
-                        .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
-                let in_range = self.builder.ins().band(ge_start, lt_end);
-                self.builder
-                    .ins()
-                    .brif(in_range, body_blocks[i], &[], next, &[]);
-            }
+            self.builder.switch_to_block(body_block);
+            self.builder.seal_block(body_block);
+            self.emit_region_write(region, addr, masked);
+            self.builder.ins().jump(merge_block, &[]);
 
-            self.builder.switch_to_block(body_blocks[i]);
-            self.builder.seal_block(body_blocks[i]);
-            match region.kind {
-                RegionKind::Buffer { base, offset } => {
-                    self.emit_buffer_store_dyn(base, region.start, offset, addr, masked);
-                    self.builder.ins().jump(merge_block, &[]);
-                }
-                RegionKind::Callback {
-                    opaque, write_fn, ..
-                } => {
-                    self.emit_callback_write_dyn(opaque, write_fn, addr, masked);
-                    self.builder.ins().jump(merge_block, &[]);
-                }
-            }
+            self.builder.switch_to_block(next_block);
+            self.builder.seal_block(next_block);
         }
 
-        self.builder.switch_to_block(fallthrough_block);
-        self.builder.seal_block(fallthrough_block);
+        // Unmapped fallthrough: silently drop
         self.builder.ins().jump(merge_block, &[]);
 
         self.builder.switch_to_block(merge_block);
         self.builder.seal_block(merge_block);
         if has_callbacks {
             self.invalidate_promoted();
+        }
+    }
+
+    /// Emit a range check: branch to `hit` if addr is in region, `miss` otherwise.
+    fn emit_region_range_check(
+        &mut self,
+        region: &crate::core::MemoryRegion,
+        addr: Value,
+        hit: cranelift_codegen::ir::Block,
+        miss: cranelift_codegen::ir::Block,
+    ) {
+        if region.start == 0 {
+            // Region starts at 0: only need upper bound check
+            let lt_end =
+                self.builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
+            self.builder.ins().brif(lt_end, hit, &[], miss, &[]);
+        } else {
+            let ge_start = self.builder.ins().icmp_imm(
+                IntCC::UnsignedGreaterThanOrEqual,
+                addr,
+                region.start as i64,
+            );
+            let lt_end =
+                self.builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
+            let in_range = self.builder.ins().band(ge_start, lt_end);
+            self.builder.ins().brif(in_range, hit, &[], miss, &[]);
+        }
+    }
+
+    /// Emit a read from a specific region (buffer load or callback call).
+    fn emit_region_read(&mut self, region: &crate::core::MemoryRegion, addr: Value) -> Value {
+        match region.kind {
+            RegionKind::Buffer { base, offset } => {
+                self.emit_buffer_load_dyn(base, region.start, offset, addr)
+            }
+            RegionKind::Callback {
+                opaque, read_fn, ..
+            } => self.emit_callback_read_dyn(opaque, read_fn, addr),
+        }
+    }
+
+    /// Emit a write to a specific region (buffer store or callback call).
+    fn emit_region_write(&mut self, region: &crate::core::MemoryRegion, addr: Value, val: Value) {
+        match region.kind {
+            RegionKind::Buffer { base, offset } => {
+                self.emit_buffer_store_dyn(base, region.start, offset, addr, val);
+            }
+            RegionKind::Callback {
+                opaque, write_fn, ..
+            } => {
+                self.emit_callback_write_dyn(opaque, write_fn, addr, val);
+            }
         }
     }
 }
