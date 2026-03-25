@@ -202,13 +202,10 @@ impl JitEngine {
                 .as_ref()
                 .map(|b| b.end_pc)
                 .unwrap_or(*pc + 1);
-            let first_opcode = map.read_pram(*pc);
-            let next_word = map.read_pram(mask_pc(*pc + 1));
-            let (disasm, _) = dsp56300_disasm::disassemble(*pc, first_opcode, next_word);
             let pct = (*cycles as f64 / total_cycles as f64) * 100.0;
             let _ = writeln!(
                 f,
-                "{:04x}..{:04x} ({:2} insn)  {:>10} {:>14} {:>8} {:>5.1}%  {}",
+                "{:04x}..{:04x} ({:2} insn)  {:>10} {:>14} {:>8} {:>5.1}%",
                 pc,
                 end_pc,
                 end_pc - pc,
@@ -216,37 +213,32 @@ impl JitEngine {
                 cycles,
                 cycles / hits.max(&1),
                 pct,
-                disasm,
             );
         }
         let _ = writeln!(f, "\ntotal_cycles: {}", total_cycles);
 
+        // Dump raw P-space words for offline disassembly
         let _ = writeln!(f, "\n\n{}", "=".repeat(80));
-        let _ = writeln!(f, "DISASSEMBLY OF TOP 20 BLOCKS");
+        let _ = writeln!(f, "P-SPACE DUMP OF TOP 20 BLOCKS");
         let _ = writeln!(f, "{}", "=".repeat(80));
+        let p_end = map.p_space_end();
         for (pc, _hits, cycles) in entries.iter().take(20) {
             let end_pc = self.cache.blocks[*pc as usize]
                 .as_ref()
                 .map(|b| b.end_pc)
                 .unwrap_or(*pc + 1);
-            let num_insn = end_pc - pc;
             let pct = (*cycles as f64 / total_cycles as f64) * 100.0;
             let _ = writeln!(
                 f,
-                "\n=== Block {:04x}..{:04x} ({} insn, {:.1}%, {} cycles) ===",
-                pc, end_pc, num_insn, pct, cycles,
+                "\n=== Block {:04x}..{:04x} ({} words, {:.1}%, {} cycles) ===",
+                pc,
+                end_pc,
+                end_pc - pc,
+                pct,
+                cycles,
             );
-            let mut addr = *pc;
-            let p_end = map.p_space_end();
-            while addr < end_pc {
-                if addr >= p_end {
-                    break;
-                }
-                let opcode = map.read_pram(addr);
-                let next_word = map.read_pram(mask_pc(addr + 1));
-                let (disasm, len) = dsp56300_disasm::disassemble(addr, opcode, next_word);
-                let _ = writeln!(f, "  {:04x}: {}", addr, disasm);
-                addr += len;
+            for addr in *pc..end_pc.min(p_end) {
+                let _ = writeln!(f, "P {:04X} {:06X}", addr, map.read_pram(addr));
             }
         }
     }

@@ -1028,7 +1028,7 @@ fn test_dump_profile() {
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("hits"));
     assert!(contents.contains("total_cycles"));
-    assert!(contents.contains("DISASSEMBLY OF TOP 20 BLOCKS"));
+    assert!(contents.contains("P-SPACE DUMP OF TOP 20 BLOCKS"));
     assert!(contents.contains("0000.."));
     std::fs::remove_file(&path).ok();
 }
