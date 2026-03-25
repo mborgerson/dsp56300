@@ -150,6 +150,29 @@ impl JitEngine {
         self.block_profile.is_some()
     }
 
+    /// Number of compiled blocks in the cache.
+    pub fn block_count(&self) -> usize {
+        self.cache.blocks.iter().filter(|b| b.is_some()).count()
+    }
+
+    /// Number of cached single-instruction compilations.
+    pub fn instr_cache_count(&self) -> usize {
+        self.instr_cache.len()
+    }
+
+    /// Iterate over compiled blocks: yields (start_pc, end_pc, num_words).
+    pub fn block_sizes(&self) -> Vec<(u32, u32, u32)> {
+        self.cache
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, b)| {
+                b.as_ref()
+                    .map(|b| (pc as u32, b.end_pc, b.end_pc - pc as u32))
+            })
+            .collect()
+    }
+
     /// Invalidate all cached blocks and release compiled code memory.
     pub fn invalidate_cache(&mut self) {
         self.cache.invalidate_all();
