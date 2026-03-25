@@ -398,7 +398,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "dsp56300"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dsp56300-asm",
  "dsp56300-core",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "dsp56300-asm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chumsky",
  "clap",
@@ -420,11 +420,11 @@ dependencies = [
 
 [[package]]
 name = "dsp56300-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "dsp56300-disasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dsp56300-core",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "dsp56300-emu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "cranelift-codegen",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "dsp56300-emu-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cbindgen",
  "cc",
