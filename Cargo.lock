@@ -442,7 +442,6 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "dsp56300-core",
- "dsp56300-disasm",
  "target-lexicon",
 ]
 
