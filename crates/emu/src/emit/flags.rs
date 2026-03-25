@@ -1,6 +1,208 @@
 use super::*;
 
 impl<'a> Emitter<'a> {
+    /// Flush any pending lazy flag computation into SR. Called automatically
+    /// when SR is read via `load_reg(SR)`. The `take()` ensures re-entrant
+    /// calls (from the flag computation code itself loading SR) are safe.
+    fn set_pending(&mut self, flags: PendingFlags) {
+        self.pending_flags = Some(flags);
+    }
+
+    pub(super) fn flush_pending_flags(&mut self) {
+        let Some(flags) = self.pending_flags.take() else {
+            return;
+        };
+        match flags {
+            PendingFlags::AluAddSub {
+                result56,
+                source,
+                dest,
+                result_raw,
+                is_sub,
+            } => {
+                self.update_nz_now(result56);
+                self.update_vcl(source, dest, result_raw, is_sub);
+                self.emit_sm_vl_deferred();
+            }
+            PendingFlags::NzClearV { result56 } => {
+                self.update_nz_now(result56);
+                self.clear_v_flag();
+            }
+            PendingFlags::NzOnly { result56 } => {
+                self.update_nz_now(result56);
+            }
+            PendingFlags::NzClearVSm { result56 } => {
+                self.update_nz_now(result56);
+                self.clear_v_flag();
+                self.emit_sm_vl_deferred();
+            }
+            PendingFlags::MacVlSm {
+                result56,
+                product,
+                acc,
+            } => {
+                self.update_nz_now(result56);
+                self.mac_set_vl(product, acc, result56);
+                self.emit_sm_vl_deferred();
+            }
+            PendingFlags::NzVlSm { result56, overflow } => {
+                self.update_nz_now(result56);
+                self.set_vl_overflow(overflow);
+                self.emit_sm_vl_deferred();
+            }
+            PendingFlags::NzSm { result56 } => {
+                self.update_nz_now(result56);
+                self.emit_sm_vl_deferred();
+            }
+            PendingFlags::NzVclSub {
+                result56,
+                source,
+                dest,
+                result_raw,
+            } => {
+                self.update_nz_now(result56);
+                self.update_vcl_sub(source, dest, result_raw);
+            }
+            PendingFlags::AddlSubl {
+                result56,
+                source,
+                dest_shifted,
+                result_raw,
+                is_sub,
+                asl_carry,
+                asl_v,
+            } => {
+                self.update_nz_now(result56);
+                self.update_vcl(source, dest_shifted, result_raw, is_sub);
+                self.xor_c_or_vl(asl_carry, asl_v);
+                self.emit_sm_vl_deferred();
+            }
+            PendingFlags::DmacVl {
+                result56,
+                product,
+                acc,
+            } => {
+                self.update_nz_now(result56);
+                self.mac_set_vl(product, acc, result56);
+            }
+            PendingFlags::Shift24 {
+                carry,
+                n_val,
+                result,
+            } => {
+                self.update_shift24_flags(carry, n_val, result);
+            }
+            PendingFlags::Logical { result24 } => {
+                self.update_nzv_logical(result24);
+            }
+        }
+    }
+
+    /// Set pending EUNZ + VCL flags for a standard add/sub ALU operation.
+    /// Replaces any previously pending flags.
+    pub(super) fn set_flags_addsub(
+        &mut self,
+        result56: Value,
+        source: Value,
+        dest: Value,
+        result_raw: Value,
+        is_sub: bool,
+    ) {
+        self.set_pending(PendingFlags::AluAddSub {
+            result56,
+            source,
+            dest,
+            result_raw,
+            is_sub,
+        });
+    }
+
+    /// Set pending EUNZ flags with V cleared (TST pattern).
+    pub(super) fn set_flags_nz_clear_v(&mut self, result56: Value) {
+        self.set_pending(PendingFlags::NzClearV { result56 });
+    }
+
+    pub(super) fn set_flags_nz(&mut self, result56: Value) {
+        self.set_pending(PendingFlags::NzOnly { result56 });
+    }
+
+    pub(super) fn set_flags_nz_clear_v_sm(&mut self, result56: Value) {
+        self.set_pending(PendingFlags::NzClearVSm { result56 });
+    }
+
+    pub(super) fn set_flags_mac_vl_sm(&mut self, result56: Value, product: Value, acc: Value) {
+        self.set_pending(PendingFlags::MacVlSm {
+            result56,
+            product,
+            acc,
+        });
+    }
+
+    pub(super) fn set_flags_nz_vl_sm(&mut self, result56: Value, overflow: Value) {
+        self.set_pending(PendingFlags::NzVlSm { result56, overflow });
+    }
+
+    pub(super) fn set_flags_nz_sm(&mut self, result56: Value) {
+        self.set_pending(PendingFlags::NzSm { result56 });
+    }
+
+    pub(super) fn set_flags_nz_vcl_sub(
+        &mut self,
+        result56: Value,
+        source: Value,
+        dest: Value,
+        result_raw: Value,
+    ) {
+        self.set_pending(PendingFlags::NzVclSub {
+            result56,
+            source,
+            dest,
+            result_raw,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn set_flags_addl_subl(
+        &mut self,
+        result56: Value,
+        source: Value,
+        dest_shifted: Value,
+        result_raw: Value,
+        is_sub: bool,
+        asl_carry: Value,
+        asl_v: Value,
+    ) {
+        self.set_pending(PendingFlags::AddlSubl {
+            result56,
+            source,
+            dest_shifted,
+            result_raw,
+            is_sub,
+            asl_carry,
+            asl_v,
+        });
+    }
+
+    pub(super) fn set_flags_dmac_vl(&mut self, result56: Value, product: Value, acc: Value) {
+        self.set_pending(PendingFlags::DmacVl {
+            result56,
+            product,
+            acc,
+        });
+    }
+
+    pub(super) fn set_flags_shift24(&mut self, carry: Value, n_val: Option<Value>, result: Value) {
+        self.set_pending(PendingFlags::Shift24 {
+            carry,
+            n_val,
+            result,
+        });
+    }
+
+    pub(super) fn set_flags_logical(&mut self, result24: Value) {
+        self.set_pending(PendingFlags::Logical { result24 });
+    }
+
     /// Load SR and clear the given flag bits. Returns the cleared SR value.
     /// `flags` is a bitmask, e.g. `(1u32 << sr::N) | (1u32 << sr::Z)`.
     pub(super) fn clear_sr_flags(&mut self, flags: u32) -> Value {
@@ -9,144 +211,17 @@ impl<'a> Emitter<'a> {
         self.builder.ins().band(sr, mask)
     }
 
-    /// Update CCR flags E, U, N, Z from a 56-bit accumulator result.
-    ///
-    /// Computes flags based on the scaling mode (S1:S0 bits in SR).
+    /// Lazy EUNZ update: stores result for deferred computation.
     pub(super) fn update_nz(&mut self, acc_val: Value) {
-        let sr_val = self.load_reg(reg::SR);
-        let clear_mask = !((1u32 << sr::E) | (1u32 << sr::U) | (1u32 << sr::N) | (1u32 << sr::Z));
-        let clear = self.builder.ins().iconst(types::I32, clear_mask as i64);
-        let sr_c = self.builder.ins().band(sr_val, clear);
+        self.set_flags_nz(acc_val);
+    }
 
-        // Extract accumulator parts (reg2/LSP not needed; Z uses full acc_val):
-        //   reg0 = bits 55:48 (extension byte, 8 bits)
-        //   reg1 = bits 47:24 (MSP, 24 bits)
-        let c24 = self.builder.ins().iconst(types::I32, 24);
-        let c48 = self.builder.ins().iconst(types::I32, 48);
-        let mask24_i64 = self.builder.ins().iconst(types::I64, 0xFFFFFF);
-        let mask8_i64 = self.builder.ins().iconst(types::I64, 0xFF);
-
-        let reg1_64 = {
-            let shifted = self.builder.ins().ushr(acc_val, c24);
-            self.builder.ins().band(shifted, mask24_i64)
-        };
-        let reg0_64 = {
-            let shifted = self.builder.ins().ushr(acc_val, c48);
-            self.builder.ins().band(shifted, mask8_i64)
-        };
-
-        let reg0 = self.builder.ins().ireduce(types::I32, reg0_64);
-        let reg1 = self.builder.ins().ireduce(types::I32, reg1_64);
-
-        // Extract scaling mode: (SR >> S0) & 3
-        let s0_shift = self.builder.ins().iconst(types::I32, sr::S0 as i64);
-        let scaling = self.builder.ins().ushr(sr_val, s0_shift);
-        let three = self.builder.ins().iconst(types::I32, 3);
-        let scaling = self.builder.ins().band(scaling, three);
-
-        // Compute E and U based on scaling mode
-        // We implement scaling=0 (most common), scaling=1, scaling=2.
-        // For scaling=3, E and U are not modified (cleared above).
-
-        let zero32 = self.builder.ins().iconst(types::I32, 0);
-        let one32 = self.builder.ins().iconst(types::I32, 1);
-
-        // --- Scaling 0 (no scaling) ---
-        // E: value_e = (reg0 << 1) | (reg1 >> 23)
-        //    E = (value_e != 0 && value_e != 0x1FF)
-        let reg0_shl1 = self.builder.ins().ishl(reg0, one32);
-        let c23 = self.builder.ins().iconst(types::I32, 23);
-        let reg1_shr23 = self.builder.ins().ushr(reg1, c23);
-        let value_e0 = self.builder.ins().bor(reg0_shl1, reg1_shr23);
-        let mask_9 = self.builder.ins().iconst(types::I32, 0x1FF);
-        let value_e0 = self.builder.ins().band(value_e0, mask_9);
-        let e0_nz = self.builder.ins().icmp(IntCC::NotEqual, value_e0, zero32);
-        let e0_nff = self.builder.ins().icmp(IntCC::NotEqual, value_e0, mask_9);
-        let e0_set = self.builder.ins().band(e0_nz, e0_nff);
-
-        // U: (reg1 & 0xC00000) == 0 || (reg1 & 0xC00000) == 0xC00000
-        let mask_c0 = self.builder.ins().iconst(types::I32, 0xC00000u32 as i64);
-        let u0_bits = self.builder.ins().band(reg1, mask_c0);
-        let u0_zero = self.builder.ins().icmp(IntCC::Equal, u0_bits, zero32);
-        let u0_full = self.builder.ins().icmp(IntCC::Equal, u0_bits, mask_c0);
-        let u0_set = self.builder.ins().bor(u0_zero, u0_full);
-
-        // --- Scaling 1 (scale up) ---
-        // E: (reg0 != 0 && reg0 != 0xFF)
-        let mask_ff = self.builder.ins().iconst(types::I32, 0xFF);
-        let e1_nz = self.builder.ins().icmp(IntCC::NotEqual, reg0, zero32);
-        let e1_nff = self.builder.ins().icmp(IntCC::NotEqual, reg0, mask_ff);
-        let e1_set = self.builder.ins().band(e1_nz, e1_nff);
-
-        // U: ((reg0 << 1) | (reg1 >> 23)) & 3  == 0 or == 3
-        let u1_val = self.builder.ins().band(value_e0, three);
-        let u1_zero = self.builder.ins().icmp(IntCC::Equal, u1_val, zero32);
-        let u1_full = self.builder.ins().icmp(IntCC::Equal, u1_val, three);
-        let u1_set = self.builder.ins().bor(u1_zero, u1_full);
-
-        // --- Scaling 2 (scale down) ---
-        // E: value_e = (reg0 << 2) | (reg1 >> 22)
-        //    E = (value_e != 0 && value_e != 0x3FF)
-        let two = self.builder.ins().iconst(types::I32, 2);
-        let reg0_shl2 = self.builder.ins().ishl(reg0, two);
-        let c22 = self.builder.ins().iconst(types::I32, 22);
-        let reg1_shr22 = self.builder.ins().ushr(reg1, c22);
-        let value_e2 = self.builder.ins().bor(reg0_shl2, reg1_shr22);
-        let mask_10 = self.builder.ins().iconst(types::I32, 0x3FF);
-        let value_e2 = self.builder.ins().band(value_e2, mask_10);
-        let e2_nz = self.builder.ins().icmp(IntCC::NotEqual, value_e2, zero32);
-        let e2_nff = self.builder.ins().icmp(IntCC::NotEqual, value_e2, mask_10);
-        let e2_set = self.builder.ins().band(e2_nz, e2_nff);
-
-        // U: (reg1 & 0x600000) == 0 || (reg1 & 0x600000) == 0x600000
-        let mask_60 = self.builder.ins().iconst(types::I32, 0x600000u32 as i64);
-        let u2_bits = self.builder.ins().band(reg1, mask_60);
-        let u2_zero = self.builder.ins().icmp(IntCC::Equal, u2_bits, zero32);
-        let u2_full = self.builder.ins().icmp(IntCC::Equal, u2_bits, mask_60);
-        let u2_set = self.builder.ins().bor(u2_zero, u2_full);
-
-        // --- Select E and U based on scaling mode ---
-        let s_is_0 = self.builder.ins().icmp(IntCC::Equal, scaling, zero32);
-        let s_is_1 = self.builder.ins().icmp(IntCC::Equal, scaling, one32);
-        let s_is_2 = self.builder.ins().icmp(IntCC::Equal, scaling, two);
-
-        let zero8 = self.builder.ins().iconst(types::I8, 0);
-
-        // E = (s==0 ? e0 : s==1 ? e1 : s==2 ? e2 : 0)
-        let e_sel = self.builder.ins().select(s_is_2, e2_set, zero8);
-        let e_sel = self.builder.ins().select(s_is_1, e1_set, e_sel);
-        let e_sel = self.builder.ins().select(s_is_0, e0_set, e_sel);
-
-        // U = (s==0 ? u0 : s==1 ? u1 : s==2 ? u2 : 0)
-        let u_sel = self.builder.ins().select(s_is_2, u2_set, zero8);
-        let u_sel = self.builder.ins().select(s_is_1, u1_set, u_sel);
-        let u_sel = self.builder.ins().select(s_is_0, u0_set, u_sel);
-
-        // Convert boolean results to SR bit positions
-        let e32 = self.builder.ins().uextend(types::I32, e_sel);
-        let e_bit = self.shift_to_bit(e32, sr::E);
-
-        let u32_v = self.builder.ins().uextend(types::I32, u_sel);
-        let u_bit = self.shift_to_bit(u32_v, sr::U);
-
-        // N = bit 55
-        let c55 = self.builder.ins().iconst(types::I32, 55);
-        let n64 = self.builder.ins().ushr(acc_val, c55);
-        let n32 = self.builder.ins().ireduce(types::I32, n64);
-        let n_bit = self.shift_to_bit(n32, sr::N);
-
-        // Z = (acc == 0)
-        let zero64 = self.builder.ins().iconst(types::I64, 0);
-        let is_z = self.builder.ins().icmp(IntCC::Equal, acc_val, zero64);
-        let z32 = self.builder.ins().uextend(types::I32, is_z);
-        let z_bit = self.shift_to_bit(z32, sr::Z);
-
-        // Combine: SR = (SR & ~EUNZ) | E | U | N | Z
-        let sr_new = self.builder.ins().bor(sr_c, e_bit);
-        let sr_new = self.builder.ins().bor(sr_new, u_bit);
-        let sr_new = self.builder.ins().bor(sr_new, n_bit);
-        let sr_new = self.builder.ins().bor(sr_new, z_bit);
-        self.store_reg(reg::SR, sr_new);
+    /// Immediate EUNZ update via extern helper. Replaces 77 IR instructions
+    /// with a single native function call, dramatically reducing Cranelift
+    /// compilation time while keeping the same runtime semantics.
+    fn update_nz_now(&mut self, acc_val: Value) {
+        use crate::core::jit_update_nz;
+        self.emit_call_sr_helper_i64(jit_update_nz as *const () as usize, acc_val);
     }
 
     /// Update CCR flags for logical operations (AND, OR, EOR, NOT).
@@ -191,49 +266,36 @@ impl<'a> Emitter<'a> {
         self.store_reg(reg::SR, sr_new);
     }
 
-    /// Arithmetic Saturation Mode (SM, SR bit 20) - value clamping.
-    /// When SM=1, clamps a 56-bit accumulator result to 48 bits.
-    /// Checks bits 55, 48, 47: if not all the same, clamps to max-pos or max-neg.
-    /// Stores the `needs_sat` flag in `sm_needs_sat_var` for deferred V/L update.
-    /// Returns the (possibly clamped) value. Caller MUST call `emit_sm_vl_deferred()`
-    /// AFTER the instruction's normal flag computation.
+    /// Arithmetic Saturation Mode via extern helper. Returns bits 55:0 as the
+    /// (possibly clamped) value. Bit 56 of the helper's return encodes needs_sat.
     pub(super) fn emit_saturate_sm(&mut self, result: Value) -> Value {
-        let sr = self.load_reg(reg::SR);
-        // Extract SM bit (bit 20) from SR (i32)
-        let sm_shift = self.builder.ins().iconst(types::I32, sr::SM as i64);
-        let sm = self.builder.ins().ushr(sr, sm_shift);
-        let one32 = self.builder.ins().iconst(types::I32, 1);
-        let sm = self.builder.ins().band(sm, one32);
+        use crate::core::jit_saturate_sm;
 
-        let b55 = self.extract_bit_i64(result, 55);
-        let b48 = self.extract_bit_i64(result, 48);
-        let b47 = self.extract_bit_i64(result, 47);
+        // Flush SR so the helper can read SM. Don't invalidate — SM doesn't change.
+        self.flush_reg(reg::SR);
+        self.promoted.dirty[reg::SR] = false;
 
-        // needs_sat = SM & ((b55 ^ b48) | (b48 ^ b47))
-        let xor_55_48 = self.builder.ins().bxor(b55, b48);
-        let xor_48_47 = self.builder.ins().bxor(b48, b47);
-        let mismatch = self.builder.ins().bor(xor_55_48, xor_48_47);
-        let needs_sat = self.builder.ins().band(sm, mismatch);
+        let fn_ptr = self
+            .builder
+            .ins()
+            .iconst(self.ptr_ty, jit_saturate_sm as *const () as usize as i64);
+        let mut sig = Signature::new(HOST_CALL_CONV);
+        sig.params.push(AbiParam::new(self.ptr_ty));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let sig_ref = self.builder.import_signature(sig);
+        let call = self
+            .builder
+            .ins()
+            .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, result]);
+        let packed = self.builder.inst_results(call)[0];
 
-        // Store needs_sat for deferred V/L update
+        // Extract needs_sat (bit 56) for deferred V/L update
+        let needs_sat = self.extract_bit_i64(packed, 56);
         self.builder.def_var(self.sm_needs_sat_var, needs_sat);
 
-        // Saturated value: bit 55 = 0 -> max positive, 1 -> max negative
-        let max_pos = self
-            .builder
-            .ins()
-            .iconst(types::I64, 0x0000_7FFF_FFFF_FFFF_i64);
-        let max_neg = self
-            .builder
-            .ins()
-            .iconst(types::I64, 0x00FF_8000_0000_0000_u64 as i64);
-        let zero32 = self.builder.ins().iconst(types::I32, 0);
-        let sign_nz = self.builder.ins().icmp(IntCC::NotEqual, b55, zero32);
-        let saturated = self.builder.ins().select(sign_nz, max_neg, max_pos);
-
-        // Select between original and saturated based on needs_sat
-        let sat_nz = self.builder.ins().icmp(IntCC::NotEqual, needs_sat, zero32);
-        self.builder.ins().select(sat_nz, saturated, result)
+        // Mask to 56 bits
+        self.mask56(packed)
     }
 
     /// Apply deferred V/L flags from a previous `emit_saturate_sm` call.
@@ -338,9 +400,5 @@ impl<'a> Emitter<'a> {
 
     pub(super) fn update_vcl_sub(&mut self, source: Value, dest: Value, result: Value) {
         self.update_vcl(source, dest, result, true);
-    }
-
-    pub(super) fn update_vcl_add(&mut self, source: Value, dest: Value, result: Value) {
-        self.update_vcl(source, dest, result, false);
     }
 }
