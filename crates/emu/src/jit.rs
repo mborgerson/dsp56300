@@ -268,9 +268,11 @@ impl JitEngine {
     }
 
     /// Get a cached compiled instruction or compile and cache it.
-    /// Keyed by (pc, opcode, next_word) for self-modifying code correctness:
-    /// if PRAM changes, the key mismatches and we recompile.
-    /// Returns (compiled_fn, instruction_length).
+    ///
+    /// PC-independent instructions (ALU, moves, logical, etc.) are cached
+    /// by `(opcode, next_word)` only -- one compilation serves all addresses.
+    /// PC-dependent instructions (branches, DO loops, LRA) are cached by
+    /// `(pc, opcode, next_word)` since their generated code embeds the PC.
     pub fn get_or_compile_instruction(
         &mut self,
         pc: u32,
@@ -278,15 +280,85 @@ impl JitEngine {
         next_word: u32,
         map: &MemoryMap,
     ) -> (CompiledFn, u32) {
-        let key = (pc, opcode, next_word);
+        let inst = decode::decode(opcode);
+        let pc_key = if Self::instruction_uses_pc(&inst) {
+            pc
+        } else {
+            0
+        };
+        let key = (pc_key, opcode, next_word);
         if let Some(&entry) = self.instr_cache.get(&key) {
             return entry;
         }
-        let inst = decode::decode(opcode);
         let inst_len = decode::instruction_length(&inst);
         let func = self.compile_instruction(&inst, pc, next_word, map);
         self.instr_cache.insert(key, (func, inst_len));
         (func, inst_len)
+    }
+
+    /// Returns true if the instruction's compiled code depends on PC.
+    fn instruction_uses_pc(inst: &Instruction) -> bool {
+        matches!(
+            inst,
+            Instruction::Bra { .. }
+                | Instruction::BraLong
+                | Instruction::BraRn { .. }
+                | Instruction::Bcc { .. }
+                | Instruction::BccLong { .. }
+                | Instruction::BccRn { .. }
+                | Instruction::Bsr { .. }
+                | Instruction::BsrLong
+                | Instruction::BsrRn { .. }
+                | Instruction::Bscc { .. }
+                | Instruction::BsccLong { .. }
+                | Instruction::BsccRn { .. }
+                | Instruction::Jsr { .. }
+                | Instruction::JsrEa { .. }
+                | Instruction::Jscc { .. }
+                | Instruction::JsccEa { .. }
+                | Instruction::DoImm { .. }
+                | Instruction::DoReg { .. }
+                | Instruction::DoAa { .. }
+                | Instruction::DoEa { .. }
+                | Instruction::DoForever
+                | Instruction::DorImm { .. }
+                | Instruction::DorReg { .. }
+                | Instruction::DorAa { .. }
+                | Instruction::DorEa { .. }
+                | Instruction::DorForever
+                | Instruction::LraRn { .. }
+                | Instruction::LraDisp { .. }
+                | Instruction::BrclrEa { .. }
+                | Instruction::BrclrAa { .. }
+                | Instruction::BrclrPp { .. }
+                | Instruction::BrclrQq { .. }
+                | Instruction::BrclrReg { .. }
+                | Instruction::BrsetEa { .. }
+                | Instruction::BrsetAa { .. }
+                | Instruction::BrsetPp { .. }
+                | Instruction::BrsetQq { .. }
+                | Instruction::BrsetReg { .. }
+                | Instruction::BsclrEa { .. }
+                | Instruction::BsclrAa { .. }
+                | Instruction::BsclrPp { .. }
+                | Instruction::BsclrQq { .. }
+                | Instruction::BsclrReg { .. }
+                | Instruction::BssetEa { .. }
+                | Instruction::BssetAa { .. }
+                | Instruction::BssetPp { .. }
+                | Instruction::BssetQq { .. }
+                | Instruction::BssetReg { .. }
+                | Instruction::JsclrEa { .. }
+                | Instruction::JsclrAa { .. }
+                | Instruction::JsclrPp { .. }
+                | Instruction::JsclrQq { .. }
+                | Instruction::JsclrReg { .. }
+                | Instruction::JssetEa { .. }
+                | Instruction::JssetAa { .. }
+                | Instruction::JssetPp { .. }
+                | Instruction::JssetQq { .. }
+                | Instruction::JssetReg { .. }
+        )
     }
 
     /// Compile a single decoded instruction into a callable function.
