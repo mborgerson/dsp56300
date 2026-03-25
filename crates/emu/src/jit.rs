@@ -17,7 +17,7 @@ use crate::emit::Emitter;
 use dsp56300_core::{Instruction, decode, mask_pc};
 
 /// Maximum instructions per basic block.
-const MAX_BLOCK_LEN: u32 = 64;
+const MAX_BLOCK_LEN: u32 = 128;
 
 /// Compiled function signature: takes a pointer to DspState, returns cycles.
 type CompiledFn = unsafe fn(*mut DspState) -> i32;
