@@ -25,8 +25,9 @@ const HOST_CALL_CONV: CallConv = CallConv::AppleAarch64;
 const HOST_CALL_CONV: CallConv = CallConv::SystemV;
 
 use crate::core::{
-    DspState, InterruptState, MemSpace, MemoryMap, PowerState, RegionKind, interrupt, jit_read_ssh,
-    jit_rnd56, jit_update_rn, jit_write_mem, jit_write_sp, jit_write_ssh, jit_write_ssl, reg, sr,
+    DspState, InterruptState, MemSpace, MemoryMap, PowerState, RegionKind, interrupt,
+    jit_read_accu24, jit_read_ssh, jit_rnd56, jit_update_rn, jit_write_mem, jit_write_sp,
+    jit_write_ssh, jit_write_ssl, reg, sr,
 };
 use dsp56300_core::{
     Accumulator, CondCode, Instruction, MulShiftOp, PERIPH_BASE, ParallelAlu, ParallelMoveType,
@@ -1801,6 +1802,57 @@ impl<'a> Emitter<'a> {
     }
 
     // instruction emitters
+
+    /// Emit a call to jit_read_accu24: flushes only the accumulator sub-regs
+    /// and SR, calls the helper, invalidates SR (modified by helper).
+    /// Returns the raw u32 result (bits 23:0 = value, bit 24 = no_limit).
+    fn emit_call_read_accu24(&mut self, acc_idx: u32) -> Value {
+        // Flush pending CCR flags so SR is up-to-date
+        self.flush_pending_flags();
+
+        // Flush only the sub-registers the helper reads + SR
+        let regs = if acc_idx == 0 {
+            [reg::A2, reg::A1, reg::A0]
+        } else {
+            [reg::B2, reg::B1, reg::B0]
+        };
+        for &r in &regs {
+            self.flush_reg(r);
+            self.promoted.dirty[r] = false;
+        }
+        self.flush_reg(reg::SR);
+        self.promoted.dirty[reg::SR] = false;
+
+        // Also flush the packed accumulator — the helper reads sub-regs from
+        // state directly, but load_acc may have been called earlier putting
+        // the accumulator into the i64 Variable without writing sub-regs back.
+        self.flush_acc_to_memory(if acc_idx == 0 {
+            Accumulator::A
+        } else {
+            Accumulator::B
+        });
+
+        let fn_addr = jit_read_accu24 as *const () as usize;
+        let fn_ptr = self.builder.ins().iconst(self.ptr_ty, fn_addr as i64);
+        let acc_val = self.builder.ins().iconst(types::I32, acc_idx as i64);
+        let mut sig = Signature::new(HOST_CALL_CONV);
+        sig.params.push(AbiParam::new(self.ptr_ty)); // *mut DspState
+        sig.params.push(AbiParam::new(types::I32)); // acc_idx
+        sig.returns.push(AbiParam::new(types::I32)); // result
+        let sig_ref = self.builder.import_signature(sig);
+        let call = self
+            .builder
+            .ins()
+            .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, acc_val]);
+
+        // Invalidate SR (helper modifies L and S flags)
+        self.promoted.valid[reg::SR] = false;
+        if let Some(scope) = self.scope_stack.last_mut() {
+            scope.entry_valid[reg::SR] = true;
+        }
+
+        self.builder.inst_results(call)[0]
+    }
 
     /// Emit a call to an extern "C" fn(*mut DspState, u32) helper.
     /// Flushes/reloads promoted registers (used by SSH/SSL/SP helpers).

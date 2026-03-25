@@ -3,26 +3,6 @@ use super::*;
 impl<'a> Emitter<'a> {
     // helpers: register access
 
-    /// Load a promoted register without flushing pending CCR flags.
-    /// Safe for reading SR control bits or any non-SR register.
-    fn load_reg_unflushed(&mut self, idx: usize) -> Value {
-        if let Some(var) = self.promoted.vars[idx] {
-            if !self.promoted.valid[idx] {
-                let scope = self.scope_stack.last_mut().unwrap();
-                if !scope.entry_valid[idx] {
-                    scope.deferred[idx] = true;
-                } else {
-                    let val = self.load_u32(Self::reg_offset(idx));
-                    self.builder.def_var(var, val);
-                }
-                self.promoted.valid[idx] = true;
-            }
-            self.builder.use_var(var)
-        } else {
-            self.load_u32(Self::reg_offset(idx))
-        }
-    }
-
     pub(super) fn load_reg(&mut self, idx: usize) -> Value {
         if idx == reg::SR {
             self.flush_pending_flags();
@@ -438,134 +418,15 @@ impl<'a> Emitter<'a> {
     }
 
     /// Like [`read_accu24`] but also returns the `no_limit` flag (nonzero = not clamped).
+    /// Calls the `jit_read_accu24` extern helper which handles scaling, limiting,
+    /// and S/L flag updates. Returns (24-bit value, no_limit flag).
     pub(super) fn read_accu24_inner(&mut self, idx: usize) -> (Value, Value) {
-        let (r2, r1, r0) = if idx == reg::A {
-            (reg::A2, reg::A1, reg::A0)
-        } else {
-            (reg::B2, reg::B1, reg::B0)
-        };
+        let acc_idx = if idx == reg::A { 0u32 } else { 1u32 };
+        let raw = self.emit_call_read_accu24(acc_idx);
 
-        let a2 = self.load_reg(r2);
-        let a1 = self.load_reg(r1);
-        let a0 = self.load_reg(r0);
-
-        // value = (A2 << 24) | A1
-        let c24 = self.builder.ins().iconst(types::I32, 24);
-        let a2_shifted = self.builder.ins().ishl(a2, c24);
-        let combined = self.builder.ins().bor(a2_shifted, a1);
-
-        // Apply scaling based on SR[S1:S0] — control bits, no CCR flush needed.
-        let sr = self.load_reg_unflushed(reg::SR);
-        let s_shift = self.builder.ins().iconst(types::I32, sr::S0 as i64);
-        let scaling = self.builder.ins().ushr(sr, s_shift);
-        let three = self.builder.ins().iconst(types::I32, 3);
-        let scaling = self.builder.ins().band(scaling, three);
-
-        // Scale down (scaling == 1): value >> 1
-        let one32 = self.builder.ins().iconst(types::I32, 1);
-        let scaled_down = self.builder.ins().ushr(combined, one32);
-
-        // Scale up (scaling == 2): (value << 1) | ((A0 >> 23) & 1)
-        let scaled_up = self.builder.ins().ishl(combined, one32);
-        let c23 = self.builder.ins().iconst(types::I32, 23);
-        let a0_bit23 = self.builder.ins().ushr(a0, c23);
-        let a0_bit23 = self.builder.ins().band(a0_bit23, one32);
-        let scaled_up = self.builder.ins().bor(scaled_up, a0_bit23);
-
-        // Select based on scaling value
-        let s_one = self.builder.ins().iconst(types::I32, 1);
-        let s_two = self.builder.ins().iconst(types::I32, 2);
-        let is_s1 = self.builder.ins().icmp(IntCC::Equal, scaling, s_one);
-        let is_s2 = self.builder.ins().icmp(IntCC::Equal, scaling, s_two);
-        let value = self.builder.ins().select(is_s2, scaled_up, combined);
-        let value = self.builder.ins().select(is_s1, scaled_down, value);
-
-        // Mask to 24 bits
-        let value = self.mask24(value);
-
-        // Limiting check:
-        // if A2==0 && value <= 0x7FFFFF -> no limit
-        // if A2==0xFF && value >= 0x800000 -> no limit
-        // otherwise -> clamp based on A2 sign, set SR.L
-        let zero = self.builder.ins().iconst(types::I32, 0);
-        let xff = self.builder.ins().iconst(types::I32, 0xFF);
-        let pos_max = self.builder.ins().iconst(types::I32, 0x7FFFFF);
-        let neg_min = self.builder.ins().iconst(types::I32, 0x800000);
-
-        let a2_is_zero = self.builder.ins().icmp(IntCC::Equal, a2, zero);
-        let a2_is_ff = self.builder.ins().icmp(IntCC::Equal, a2, xff);
-        let val_pos_ok = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThanOrEqual, value, pos_max);
-        let val_neg_ok = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, value, neg_min);
-
-        // no_limit = (A2==0 && value<=0x7FFFFF) || (A2==0xFF && value>=0x800000)
-        let ok_pos = self.builder.ins().band(a2_is_zero, val_pos_ok);
-        let ok_neg = self.builder.ins().band(a2_is_ff, val_neg_ok);
-        let no_limit = self.builder.ins().bor(ok_pos, ok_neg);
-
-        // Scale-up fix: bit 47 (A1[23]) is part of the signed integer portion
-        // but gets shifted above the 24-bit output window. Must verify it matches
-        // A2's sign, otherwise values at the extension boundary pass through
-        // unlimited when they should be clamped.
-        let a1_bit23 = self.builder.ins().ushr(a1, c23);
-        let a1_bit23 = self.builder.ins().band(a1_bit23, one32);
-        let b23_zero = self.builder.ins().icmp(IntCC::Equal, a1_bit23, zero);
-        let b23_one = self.builder.ins().icmp(IntCC::NotEqual, a1_bit23, zero);
-        let ok_pos_s2 = self.builder.ins().band(ok_pos, b23_zero);
-        let ok_neg_s2 = self.builder.ins().band(ok_neg, b23_one);
-        let no_limit_s2 = self.builder.ins().bor(ok_pos_s2, ok_neg_s2);
-        let no_limit = self.builder.ins().select(is_s2, no_limit_s2, no_limit);
-
-        // Clamped value: if A2 bit 7 set -> 0x800000, else -> 0x7FFFFF
-        let c7 = self.builder.ins().iconst(types::I32, 7);
-        let a2_sign_bit = self.builder.ins().ushr(a2, c7);
-        let a2_sign_bit = self.builder.ins().band(a2_sign_bit, one32);
-        let a2_neg = self.builder.ins().icmp(IntCC::NotEqual, a2_sign_bit, zero);
-        let clamped = self.builder.ins().select(a2_neg, neg_min, pos_max);
-
-        // Final value: no_limit ? value : clamped
-        let result = self.builder.ins().select(no_limit, value, clamped);
-
-        // Set SR.L when limiting occurred
-        let sr_l_bit = self.builder.ins().iconst(types::I32, 1i64 << sr::L);
-        let sr_current = self.load_reg(reg::SR);
-        let sr_with_l = self.builder.ins().bor(sr_current, sr_l_bit);
-        let sr_result = self.builder.ins().select(no_limit, sr_current, sr_with_l);
-
-        // Compute S flag (sticky data growth detection) per DSP56300FM Table 5-1.
-        // S is set when two adjacent bits in the accumulator (before scaling) differ,
-        // with the bit pair determined by the scaling mode:
-        //   No scaling (S1:S0=00): bits 46,45  (A46 XOR A45)
-        //   Scale up   (S1:S0=10): bits 47,46  (A47 XOR A46)
-        //   Scale down (S1:S0=01): bits 45,44  (A45 XOR A44)
-        // S is sticky: S = S_computed | S_previous
-        let acc_packed = self.load_acc(if idx == reg::A {
-            Accumulator::A
-        } else {
-            Accumulator::B
-        });
-        let bit44 = self.extract_bit_i64(acc_packed, 44);
-        let bit45 = self.extract_bit_i64(acc_packed, 45);
-        let bit46 = self.extract_bit_i64(acc_packed, 46);
-        let bit47 = self.extract_bit_i64(acc_packed, 47);
-        // No scaling: 46 XOR 45
-        let s_no = self.builder.ins().bxor(bit46, bit45);
-        // Scale up: 47 XOR 46
-        let s_up = self.builder.ins().bxor(bit47, bit46);
-        // Scale down: 45 XOR 44
-        let s_dn = self.builder.ins().bxor(bit45, bit44);
-        let s_val = self.builder.ins().select(is_s2, s_up, s_no);
-        let s_val = self.builder.ins().select(is_s1, s_dn, s_val);
-        // OR into SR.S (sticky)
-        let s_bit = self.shift_to_bit(s_val, sr::S);
-        let sr_result = self.builder.ins().bor(sr_result, s_bit);
-
-        self.store_reg(reg::SR, sr_result);
+        // Extract 24-bit result and no_limit flag from packed return value
+        let result = self.mask24(raw);
+        let no_limit = self.builder.ins().ushr_imm(raw, 24);
 
         (result, no_limit)
     }
