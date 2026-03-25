@@ -209,6 +209,68 @@ enum BitTestBranch {
     BranchSub { pc: u32 },
 }
 
+/// Deferred CCR flag computation. Instead of emitting ~70+ IR instructions
+/// after each ALU op, we record the inputs and only emit when SR is actually
+/// read. If another ALU op overwrites the flags before SR is read, the
+/// pending computation is discarded entirely.
+enum PendingFlags {
+    /// Standard ALU: EUNZ from result, VCL from add/sub operands.
+    AluAddSub {
+        result56: Value,
+        source: Value,
+        dest: Value,
+        result_raw: Value,
+        is_sub: bool,
+    },
+    /// EUNZ only, V cleared, C unchanged (TST, TFR-like).
+    NzClearV { result56: Value },
+    /// EUNZ only (caller handles V/C/L separately).
+    NzOnly { result56: Value },
+    /// EUNZ + V cleared + SM deferred (MPY/MPYR pattern).
+    NzClearVSm { result56: Value },
+    /// EUNZ + MAC overflow VL + SM deferred (MAC/MACR pattern).
+    MacVlSm {
+        result56: Value,
+        product: Value,
+        acc: Value,
+    },
+    /// EUNZ + set V/L from pre-computed overflow + SM deferred.
+    NzVlSm { result56: Value, overflow: Value },
+    /// EUNZ + SM deferred only (V/C set separately before, e.g. ASL/ASR).
+    NzSm { result56: Value },
+    /// EUNZ + VCL from sub operands (CMPM pattern, no SM).
+    NzVclSub {
+        result56: Value,
+        source: Value,
+        dest: Value,
+        result_raw: Value,
+    },
+    /// EUNZ + VCL + XOR carry + OR overflow + SM (ADDL/SUBL).
+    AddlSubl {
+        result56: Value,
+        source: Value,
+        dest_shifted: Value,
+        result_raw: Value,
+        is_sub: bool,
+        asl_carry: Value,
+        asl_v: Value,
+    },
+    /// EUNZ + DMAC VL (no SM deferred).
+    DmacVl {
+        result56: Value,
+        product: Value,
+        acc: Value,
+    },
+    /// 24-bit shift/rotate flags: C, N, Z, clear V.
+    Shift24 {
+        carry: Value,
+        n_val: Option<Value>,
+        result: Value,
+    },
+    /// Logical ops: clear V, set N/Z from 24-bit result.
+    Logical { result24: Value },
+}
+
 /// Cranelift IR emitter for DSP56300 instructions.
 pub struct Emitter<'a> {
     builder: FunctionBuilder<'a>,
@@ -232,6 +294,8 @@ pub struct Emitter<'a> {
     instructions_block: Block,
     /// Cranelift variable for deferred SM saturation V/L flag update.
     sm_needs_sat_var: Variable,
+    /// Deferred flag computation. Set by ALU ops, flushed when SR is read.
+    pending_flags: Option<PendingFlags>,
 }
 
 impl<'a> Emitter<'a> {
@@ -313,6 +377,7 @@ impl<'a> Emitter<'a> {
             scope_stack: vec![entry_scope],
             instructions_block,
             sm_needs_sat_var,
+            pending_flags: None,
         }
     }
 
@@ -1113,6 +1178,8 @@ impl<'a> Emitter<'a> {
     /// Emit a return instruction and finalize the function.
     /// Pops the entry scope and emits deferred loads in the entry pre-block.
     pub fn finalize_and_return(mut self) {
+        // Flush any deferred flag computation before writing registers to memory.
+        self.flush_pending_flags();
         // Finalize the current (instructions) block.
         self.flush_all_to_memory();
         self.flush_pending_cycles();
@@ -1748,6 +1815,28 @@ impl<'a> Emitter<'a> {
             .ins()
             .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, val]);
         self.invalidate_promoted();
+    }
+
+    /// Emit a call to an extern "C" fn(*mut DspState, i64) helper that only
+    /// modifies SR. Flushes and invalidates only SR, not all promoted registers.
+    fn emit_call_sr_helper_i64(&mut self, fn_addr: usize, val: Value) {
+        self.flush_reg(reg::SR);
+        self.promoted.dirty[reg::SR] = false;
+        let fn_ptr = self.builder.ins().iconst(self.ptr_ty, fn_addr as i64);
+        let mut sig = Signature::new(HOST_CALL_CONV);
+        sig.params.push(AbiParam::new(self.ptr_ty)); // *mut DspState
+        sig.params.push(AbiParam::new(types::I64)); // acc_val
+        let sig_ref = self.builder.import_signature(sig);
+        self.builder
+            .ins()
+            .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, val]);
+        // Invalidate SR so next load_reg(SR) reloads from memory.
+        // Mark entry_valid=true so the reload is inline (not deferred to
+        // the pre-block, which would read the stale pre-call value).
+        self.promoted.valid[reg::SR] = false;
+        if let Some(scope) = self.scope_stack.last_mut() {
+            scope.entry_valid[reg::SR] = true;
+        }
     }
 
     /// Emit a call to an extern "C" fn(*mut DspState) -> u32 helper.

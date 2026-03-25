@@ -3,7 +3,30 @@ use super::*;
 impl<'a> Emitter<'a> {
     // helpers: register access
 
+    /// Load a promoted register without flushing pending CCR flags.
+    /// Safe for reading SR control bits or any non-SR register.
+    fn load_reg_unflushed(&mut self, idx: usize) -> Value {
+        if let Some(var) = self.promoted.vars[idx] {
+            if !self.promoted.valid[idx] {
+                let scope = self.scope_stack.last_mut().unwrap();
+                if !scope.entry_valid[idx] {
+                    scope.deferred[idx] = true;
+                } else {
+                    let val = self.load_u32(Self::reg_offset(idx));
+                    self.builder.def_var(var, val);
+                }
+                self.promoted.valid[idx] = true;
+            }
+            self.builder.use_var(var)
+        } else {
+            self.load_u32(Self::reg_offset(idx))
+        }
+    }
+
     pub(super) fn load_reg(&mut self, idx: usize) -> Value {
+        if idx == reg::SR {
+            self.flush_pending_flags();
+        }
         if let Some(var) = self.promoted.vars[idx] {
             if !self.promoted.valid[idx] {
                 let scope = self.scope_stack.last_mut().unwrap();
@@ -45,6 +68,10 @@ impl<'a> Emitter<'a> {
     }
 
     pub(super) fn store_reg(&mut self, idx: usize, val: Value) {
+        if idx == reg::SR {
+            // Discard pending flags — the direct SR write supersedes them.
+            self.pending_flags = None;
+        }
         let mask = REG_MASKS[idx];
         let v = if mask != 0xFFFFFFFF {
             let m = self.builder.ins().iconst(types::I32, mask as i64);
@@ -427,8 +454,8 @@ impl<'a> Emitter<'a> {
         let a2_shifted = self.builder.ins().ishl(a2, c24);
         let combined = self.builder.ins().bor(a2_shifted, a1);
 
-        // Apply scaling based on SR[S1:S0]
-        let sr = self.load_reg(reg::SR);
+        // Apply scaling based on SR[S1:S0] — control bits, no CCR flush needed.
+        let sr = self.load_reg_unflushed(reg::SR);
         let s_shift = self.builder.ins().iconst(types::I32, sr::S0 as i64);
         let scaling = self.builder.ins().ushr(sr, s_shift);
         let three = self.builder.ins().iconst(types::I32, 3);
