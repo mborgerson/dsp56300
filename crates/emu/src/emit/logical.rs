@@ -112,7 +112,7 @@ impl<'a> Emitter<'a> {
             LogicalOp::Eor => self.builder.ins().bxor(dst, src),
         };
         self.store_reg(r1, result);
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_alu_not(&mut self, d: Accumulator) {
@@ -122,7 +122,7 @@ impl<'a> Emitter<'a> {
         let mask = self.builder.ins().iconst(types::I32, 0x00FFFFFF);
         let notted = self.builder.ins().bxor(val, mask);
         self.store_reg(r1, notted);
-        self.update_nzv_logical(notted);
+        self.set_flags_logical(notted);
     }
 
     pub(super) fn emit_alu_and_reg(&mut self, src_reg: usize, d: Accumulator) {
@@ -132,7 +132,7 @@ impl<'a> Emitter<'a> {
         let result = self.builder.ins().band(src, dst);
         let result = self.mask24(result);
         self.store_reg(r1, result);
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_alu_or_reg(&mut self, src_reg: usize, d: Accumulator) {
@@ -142,7 +142,7 @@ impl<'a> Emitter<'a> {
         let result = self.builder.ins().bor(src, dst);
         let result = self.mask24(result);
         self.store_reg(r1, result);
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_alu_eor_reg(&mut self, src_reg: usize, d: Accumulator) {
@@ -152,7 +152,7 @@ impl<'a> Emitter<'a> {
         let result = self.builder.ins().bxor(src, dst);
         let result = self.mask24(result);
         self.store_reg(r1, result);
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     /// LSR: Logical shift right A1/B1 by 1. C=old bit 0, N=0, Z=(==0), V=0.
@@ -163,7 +163,7 @@ impl<'a> Emitter<'a> {
         let carry = self.builder.ins().band(val, one);
         let result = self.builder.ins().ushr(val, one);
         self.store_reg(r1, result);
-        self.update_shift24_flags(carry, None, result);
+        self.set_flags_shift24(carry, None, result);
     }
 
     /// LSL: Logical shift left A1/B1 by 1. C=old bit 23, N=new bit 23, Z=(==0), V=0.
@@ -179,7 +179,7 @@ impl<'a> Emitter<'a> {
         self.store_reg(r1, result);
         let n_raw = self.builder.ins().ushr(result, c23);
         let n_raw = self.builder.ins().band(n_raw, one);
-        self.update_shift24_flags(carry, Some(n_raw), result);
+        self.set_flags_shift24(carry, Some(n_raw), result);
     }
 
     /// ROR: Rotate right A1/B1 by 1. Old C -> bit 23, old bit 0 -> C.
@@ -200,7 +200,7 @@ impl<'a> Emitter<'a> {
         let result = self.builder.ins().bor(shifted, high_bit);
         self.store_reg(r1, result);
         // N = bit 23 of result = old_carry (not new_carry)
-        self.update_shift24_flags(new_carry, Some(old_carry), result);
+        self.set_flags_shift24(new_carry, Some(old_carry), result);
     }
 
     /// ROL: Rotate left A1/B1 by 1 through carry. Old C -> bit 0, old bit 23 -> C.
@@ -222,7 +222,7 @@ impl<'a> Emitter<'a> {
         self.store_reg(r1, result);
         let n_raw = self.builder.ins().ushr(result, c23);
         let n_raw = self.builder.ins().band(n_raw, one);
-        self.update_shift24_flags(new_carry, Some(n_raw), result);
+        self.set_flags_shift24(new_carry, Some(n_raw), result);
     }
 
     pub(super) fn emit_lsl_imm(&mut self, shift: u8, d: Accumulator) {
@@ -236,7 +236,7 @@ impl<'a> Emitter<'a> {
             let sr = self.clear_sr_flags(1u32 << sr::C);
             self.store_reg(reg::SR, sr);
             let val = self.load_reg(r1);
-            self.update_nzv_logical(val);
+            self.set_flags_logical(val);
             return;
         }
 
@@ -250,7 +250,7 @@ impl<'a> Emitter<'a> {
         let result = self.mask24(shifted);
         self.store_reg(r1, result);
 
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_lsr_imm(&mut self, shift: u8, d: Accumulator) {
@@ -264,7 +264,7 @@ impl<'a> Emitter<'a> {
             let sr = self.clear_sr_flags(1u32 << sr::C);
             self.store_reg(reg::SR, sr);
             let val = self.load_reg(r1);
-            self.update_nzv_logical(val);
+            self.set_flags_logical(val);
             return;
         }
 
@@ -277,7 +277,7 @@ impl<'a> Emitter<'a> {
         let result = self.builder.ins().ushr(val, shift);
         self.store_reg(r1, result);
 
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_lsl_reg(&mut self, src_reg: usize, d: Accumulator) {
@@ -308,7 +308,7 @@ impl<'a> Emitter<'a> {
         let sr = self.builder.ins().bor(sr, c_shifted);
         self.store_reg(reg::SR, sr);
 
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_lsr_reg(&mut self, src_reg: usize, d: Accumulator) {
@@ -337,7 +337,7 @@ impl<'a> Emitter<'a> {
         let sr = self.builder.ins().bor(sr, c_shifted);
         self.store_reg(reg::SR, sr);
 
-        self.update_nzv_logical(result);
+        self.set_flags_logical(result);
     }
 
     pub(super) fn emit_clb(&mut self, s: Accumulator, d: Accumulator) {
@@ -391,7 +391,7 @@ impl<'a> Emitter<'a> {
 
         // Update N and Z flags based on A1 portion (bits 47:24)
         let a1 = self.extract_acc_mid(packed);
-        self.update_nzv_logical(a1);
+        self.set_flags_logical(a1);
     }
 
     /// EXTRACT / EXTRACTU: extract bit-field from accumulator.
@@ -558,6 +558,6 @@ impl<'a> Emitter<'a> {
         self.store_acc(d, result);
 
         // Update flags: N = bit 23 of new_a1, Z = (new_a1 == 0), V = 0
-        self.update_nzv_logical(new_a1);
+        self.set_flags_logical(new_a1);
     }
 }
