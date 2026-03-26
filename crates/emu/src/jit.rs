@@ -269,10 +269,10 @@ impl JitEngine {
 
     /// Get a cached compiled instruction or compile and cache it.
     ///
-    /// PC-independent instructions (ALU, moves, logical, etc.) are cached
-    /// by `(opcode, next_word)` only -- one compilation serves all addresses.
-    /// PC-dependent instructions (branches, DO loops, LRA) are cached by
-    /// `(pc, opcode, next_word)` since their generated code embeds the PC.
+    /// Cache key optimizations to maximize sharing:
+    /// - PC-independent instructions use `pc_key=0` (one compilation serves all addresses)
+    /// - Single-word instructions use `nw_key=0` (next_word is irrelevant)
+    /// - PC-dependent instructions (branches, DO loops, LRA) include the actual PC
     pub fn get_or_compile_instruction(
         &mut self,
         pc: u32,
@@ -281,16 +281,17 @@ impl JitEngine {
         map: &MemoryMap,
     ) -> (CompiledFn, u32) {
         let inst = decode::decode(opcode);
+        let inst_len = decode::instruction_length(&inst);
         let pc_key = if Self::instruction_uses_pc(&inst) {
             pc
         } else {
             0
         };
-        let key = (pc_key, opcode, next_word);
+        let nw_key = if inst_len > 1 { next_word } else { 0 };
+        let key = (pc_key, opcode, nw_key);
         if let Some(&entry) = self.instr_cache.get(&key) {
             return entry;
         }
-        let inst_len = decode::instruction_length(&inst);
         let func = self.compile_instruction(&inst, pc, next_word, map);
         self.instr_cache.insert(key, (func, inst_len));
         (func, inst_len)
@@ -665,15 +666,25 @@ mod tests {
         let mut yram = [0u32; YRAM_SIZE];
         let mut pram = [0u32; PRAM_SIZE];
         let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-        // Two separate instructions at different PCs
-        pram[0] = 0x0C0010; // jmp $10
-        pram[0x10] = 0x000000; // nop
-        run_one(&mut s, &mut jit); // compiles+runs jmp at pc=0
-        run_one(&mut s, &mut jit); // compiles+runs nop at pc=0x10
+        // Use JSCLR (PC-dependent: embeds pc+2 as return address) at two PCs.
+        // jsclr #0,X0,$100: opcode=0x0BC400, next_word=0x000100
+        pram[0x00] = 0x0BC400;
+        pram[0x01] = 0x000100;
+        pram[0x10] = 0x0BC400;
+        pram[0x11] = 0x000100;
+        s.registers[reg::X0] = 0x000001; // bit 0 set -> not taken
+        s.pc = 0;
+        run_one(&mut s, &mut jit); // compiles jsclr at pc=0
+        s.pc = 0x10;
+        run_one(&mut s, &mut jit); // compiles jsclr at pc=0x10
 
-        // Invalidate range [0, 1] - should only affect block at PC=0
+        // Both should be cached with their actual PCs (PC-dependent)
+        assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x00));
+        assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x10));
+
+        // Invalidate range [0, 1] - should only affect instruction at PC=0
         jit.invalidate_range(0, 1);
-        // Block at 0x10 should survive
+        assert!(!jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x00));
         assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x10));
     }
 
