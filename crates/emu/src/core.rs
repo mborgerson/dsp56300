@@ -1142,14 +1142,14 @@ pub unsafe extern "C" fn jit_update_nz(state: *mut DspState, acc_val: i64) {
             (e, u)
         }
         1 => {
-            // Scale up
+            // Scale down (S1:S0=01)
             let e = reg0 != 0 && reg0 != 0xFF;
             let val = ((reg0 << 1) | (reg1 >> 23)) & 3;
             let u = val == 0 || val == 3;
             (e, u)
         }
         2 => {
-            // Scale down
+            // Scale up (S1:S0=10)
             let val_e = ((reg0 << 2) | (reg1 >> 22)) & 0x3FF;
             let e = val_e != 0 && val_e != 0x3FF;
             let bits = reg1 & 0x60_0000;

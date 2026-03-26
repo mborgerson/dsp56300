@@ -3157,6 +3157,40 @@ fn test_mac_overflow_sets_v() {
 }
 
 #[test]
+fn test_mac_sm_saturation_sets_v_l() {
+    // MAC with SM=1: accumulation sum exceeds 48-bit MSP:LSP range,
+    // triggering arithmetic saturation. V and L should be set from the
+    // saturation (via emit_sm_vl_deferred), even though the 56-bit
+    // accumulation itself doesn't overflow bit 55.
+    //
+    // A = $00:7FFFFF:000000, X0=$400000 (0.5), Y0=$100000 (0.125)
+    // Product = $00:080000:000000
+    // Sum = $00:87FFFF:000000 (bit 47=1, bit 48=0 -> SM mismatch -> saturate)
+    // Stored = $00:7FFFFF:FFFFFF (clamped to max positive)
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::A2] = 0x00;
+    s.registers[reg::A1] = 0x7FFFFF;
+    s.registers[reg::A0] = 0x000000;
+    s.registers[reg::X0] = 0x400000;
+    s.registers[reg::Y0] = 0x100000;
+    // SM=1 (bit 15), IPL=3
+    s.registers[reg::SR] = 0xC00300 | (1 << sr::SM);
+    pram[0] = 0x2000D2; // mac +y0,x0,a
+    run_one(&mut s, &mut jit);
+    let sr = s.registers[reg::SR];
+    assert_ne!(sr & (1 << sr::V), 0, "V=1 from SM saturation");
+    assert_ne!(sr & (1 << sr::L), 0, "L=1 from SM saturation (sticky)");
+    // Stored value should be clamped to max positive
+    assert_eq!(s.registers[reg::A2], 0x00, "A2=$00 (positive, clamped)");
+    assert_eq!(s.registers[reg::A1], 0x7FFFFF, "A1=$7FFFFF (clamped)");
+    assert_eq!(s.registers[reg::A0], 0xFFFFFF, "A0=$FFFFFF (clamped)");
+}
+
+#[test]
 fn test_mul_shift_mac_overflow_sets_v() {
     // MAC +2^0,Y1,A: product placed at A1 position, added to A
     // A near max positive, product causes bit 55 sign flip -> V=1
@@ -5291,6 +5325,41 @@ fn test_macr_v_from_overflow() {
         0,
         "MACR: V=1 from overflow"
     );
+}
+
+#[test]
+fn test_macr_v_from_rounding_overflow() {
+    // DSP56300FM p.13-103: MACR V flag from rounding overflow.
+    // The accumulation sum is just below the bit-55 boundary, and the
+    // rounding constant pushes the result over. V should be set because
+    // bit 55 changed from 0 to 1 in the final rounded result.
+    //
+    // Setup: A = $7F:800001:FFFFFD, X0=$7FFFFF, Y0=$7FFFFF
+    // Product = 0x7FFFFF * 0x7FFFFF << 1 = $7FFFFE:000002
+    // Sum = A + product = $7F:FFFFFF:FFFFFF (bit 55 = 0, max positive)
+    // Rounding (no scaling): add $800000 to sum -> $80:000000:7FFFFF
+    // After clearing LSBs: $80:000000:000000 (bit 55 = 1)
+    // V=1 (sign changed), N=1 (bit 55 set), L=1 (L|V)
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::A2] = 0x7F;
+    s.registers[reg::A1] = 0x800001;
+    s.registers[reg::A0] = 0xFFFFFD;
+    s.registers[reg::X0] = 0x7FFFFF;
+    s.registers[reg::Y0] = 0x7FFFFF;
+    s.registers[reg::SR] = 0;
+    pram[0] = 0x2000D3; // macr x0,y0,a
+    run_one(&mut s, &mut jit);
+    let sr = s.registers[reg::SR];
+    assert_ne!(sr & (1 << sr::V), 0, "V=1: rounding caused overflow");
+    assert_ne!(sr & (1 << sr::N), 0, "N=1: result is negative");
+    assert_ne!(sr & (1 << sr::L), 0, "L=1: L|V sticky");
+    assert_eq!(s.registers[reg::A2], 0x80, "A2=$80 after rounding overflow");
+    assert_eq!(s.registers[reg::A1], 0x000000, "A1=$000000");
+    assert_eq!(s.registers[reg::A0], 0x000000, "A0=$000000");
 }
 
 #[test]
