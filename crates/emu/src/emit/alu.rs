@@ -624,20 +624,22 @@ impl<'a> Emitter<'a> {
         let acc = self.load_acc(d);
         let sum = self.builder.ins().iadd(acc, result56);
         let sum56 = self.mask56(sum);
-        let sum56 = self.emit_saturate_sm(sum56);
-        self.store_acc(d, sum56);
+        let saturated = self.emit_saturate_sm(sum56);
+        self.store_acc(d, saturated);
         self.set_flags_mac_vl_sm(sum56, result56, acc);
     }
 
     pub(super) fn emit_alu_macr(&mut self, s1: usize, s2: usize, d: Accumulator, negate: bool) {
-        let result56 = self.emit_alu_mpy_core(s1, s2, negate);
+        let product = self.emit_alu_mpy_core(s1, s2, negate);
         let acc = self.load_acc(d);
-        let sum = self.builder.ins().iadd(acc, result56);
+        let sum = self.builder.ins().iadd(acc, product);
         let sum56 = self.mask56(sum);
         let rounded = self.emit_rnd56(sum56);
-        let rounded = self.emit_saturate_sm(rounded);
-        self.store_acc(d, rounded);
-        self.set_flags_mac_vl_sm(rounded, result56, acc);
+        let saturated = self.emit_saturate_sm(rounded);
+        self.store_acc(d, saturated);
+        // MACR "result" is the rounded value (pre-saturation) per manual:
+        // operation is D +/- S1*S2 + r -> D
+        self.set_flags_mac_vl_sm(rounded, product, acc);
     }
 
     /// Emit a call to jit_rnd56(state, val) -> rounded i64.
@@ -1085,25 +1087,31 @@ impl<'a> Emitter<'a> {
 
         // MAC/MACR: accumulate; MPY/MPYR: store directly
         let is_mac = matches!(op, MulShiftOp::Mac | MulShiftOp::Macr);
-        let (final_val, mac_acc, mac_sum) = if is_mac {
+        let (final_val, mac_acc, mac_flag_result) = if is_mac {
             let acc = self.load_acc(d);
             let sum = self.builder.ins().iadd(acc, result_m);
             let sum56 = self.mask56(sum);
-            (sum56, Some(acc), Some(sum56))
+            // MACR: round, then use rounded value for flags (operation is D+/-S1*S2+r)
+            // MAC: no rounding, use sum56 for flags
+            if op == MulShiftOp::Macr {
+                let rounded = self.emit_rnd56(sum56);
+                (rounded, Some(acc), Some(rounded))
+            } else {
+                (sum56, Some(acc), Some(sum56))
+            }
         } else {
-            (result_m, None, None)
-        };
-
-        // MPYR/MACR: round
-        let final_val = match op {
-            MulShiftOp::Mpyr | MulShiftOp::Macr => self.emit_rnd56(final_val),
-            _ => final_val,
+            // MPYR: round; MPY: no round
+            let val = match op {
+                MulShiftOp::Mpyr => self.emit_rnd56(result_m),
+                _ => result_m,
+            };
+            (val, None, None)
         };
 
         let final_val = self.emit_saturate_sm(final_val);
         self.store_acc(d, final_val);
-        if let (Some(acc), Some(_sum56)) = (mac_acc, mac_sum) {
-            self.set_flags_mac_vl_sm(final_val, result_m, acc);
+        if let (Some(acc), Some(flag_result)) = (mac_acc, mac_flag_result) {
+            self.set_flags_mac_vl_sm(flag_result, result_m, acc);
         } else {
             self.set_flags_nz_clear_v_sm(final_val);
         }
@@ -1173,12 +1181,13 @@ impl<'a> Emitter<'a> {
             let sum = self.builder.ins().iadd(acc, product_m);
             let sum_m = self.mask56(sum);
             if round {
+                // MACRI: flags use rounded value (operation is D +/- #xxxx*S + r)
                 let rounded = self.emit_rnd56(sum_m);
-                let rounded = self.emit_saturate_sm(rounded);
-                (rounded, Some((product_m, acc, sum_m)))
+                let saturated = self.emit_saturate_sm(rounded);
+                (saturated, Some((product_m, acc, rounded)))
             } else {
                 let result_m = self.emit_saturate_sm(sum_m);
-                (result_m, Some((product_m, acc, result_m)))
+                (result_m, Some((product_m, acc, sum_m)))
             }
         } else if round {
             let rounded = self.emit_rnd56(product_m);
@@ -1190,8 +1199,8 @@ impl<'a> Emitter<'a> {
         };
 
         self.store_acc(d, final_val);
-        if let Some((pm, acc, _rm)) = vl_info {
-            self.set_flags_mac_vl_sm(final_val, pm, acc);
+        if let Some((pm, acc, sum)) = vl_info {
+            self.set_flags_mac_vl_sm(sum, pm, acc);
         } else {
             self.set_flags_nz_clear_v_sm(final_val);
         }
@@ -1251,6 +1260,8 @@ impl<'a> Emitter<'a> {
             result_m
         };
         self.store_acc(d, result_m);
+        // V is always 0: the product fits in ~49 bits and D>>24 in ~32 bits,
+        // so their sum cannot overflow 56 bits (2^49 + 2^31 << 2^55).
         if ss == 0 {
             self.set_flags_nz_clear_v_sm(result_m);
         } else {
