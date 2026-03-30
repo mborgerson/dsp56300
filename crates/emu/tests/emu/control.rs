@@ -3823,3 +3823,50 @@ fn test_jmp_short_ccr_unchanged() {
         "JMP: SR should be completely unchanged"
     );
 }
+
+#[test]
+fn test_jsclr_pc_dependent_return_addr() {
+    // Verify JSCLR pushes the correct return address when the same opcode
+    // appears at different PCs. The PC-independent instruction cache must
+    // NOT share compiled JSCLR across PCs (it embeds pc+2 as the return
+    // address constant).
+    //
+    // jsclr #0,X0,$100: opcode=0x0BC400, next_word=0x000100
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::X0] = 0x000002; // bit 0 clear -> taken
+
+    // Place same JSCLR at PC=$0000 and PC=$0010
+    pram[0x00] = 0x0BC400;
+    pram[0x01] = 0x000100; // target $100
+    pram[0x10] = 0x0BC400;
+    pram[0x11] = 0x000100; // target $100
+    // RTS at target to pop the return address
+    pram[0x100] = 0x00000C; // rts
+
+    // Execute JSCLR at PC=$0000 -> should push return addr $0002
+    s.pc = 0;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.pc, 0x100, "JSCLR at $0000 should jump to $100");
+    let ssh1 = s.stack[0][(s.registers[reg::SP] & 0xF) as usize];
+    assert_eq!(ssh1, 0x0002, "Return address from PC=$0000 should be $0002");
+
+    // Pop via RTS
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.pc, 0x0002, "RTS should return to $0002");
+
+    // Execute JSCLR at PC=$0010 -> should push return addr $0012
+    s.pc = 0x10;
+    s.registers[reg::X0] = 0x000002; // bit 0 still clear
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.pc, 0x100, "JSCLR at $0010 should jump to $100");
+    let ssh2 = s.stack[0][(s.registers[reg::SP] & 0xF) as usize];
+    assert_eq!(ssh2, 0x0012, "Return address from PC=$0010 should be $0012");
+
+    // Pop via RTS
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.pc, 0x0012, "RTS should return to $0012");
+}

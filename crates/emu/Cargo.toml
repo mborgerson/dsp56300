@@ -29,3 +29,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 name = "dsp56300-emu"
 path = "src/bin/emu.rs"
 required-features = ["cli"]
+
+[[bench]]
+name = "jit"
+harness = false

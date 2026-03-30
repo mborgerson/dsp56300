@@ -17,7 +17,7 @@ use crate::emit::Emitter;
 use dsp56300_core::{Instruction, decode, mask_pc};
 
 /// Maximum instructions per basic block.
-const MAX_BLOCK_LEN: u32 = 64;
+const MAX_BLOCK_LEN: u32 = 128;
 
 /// Compiled function signature: takes a pointer to DspState, returns cycles.
 type CompiledFn = unsafe fn(*mut DspState) -> i32;
@@ -117,6 +117,7 @@ impl JitEngine {
         let _ = flag_builder.set("opt_level", "none");
         let _ = flag_builder.set("enable_verifier", "false");
         let _ = flag_builder.set("unwind_info", "false");
+        let _ = flag_builder.set("regalloc_algorithm", "single_pass");
         let isa_builder = cranelift_native::builder().unwrap();
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
@@ -148,6 +149,29 @@ impl JitEngine {
 
     pub fn is_profiling(&self) -> bool {
         self.block_profile.is_some()
+    }
+
+    /// Number of compiled blocks in the cache.
+    pub fn block_count(&self) -> usize {
+        self.cache.blocks.iter().filter(|b| b.is_some()).count()
+    }
+
+    /// Number of cached single-instruction compilations.
+    pub fn instr_cache_count(&self) -> usize {
+        self.instr_cache.len()
+    }
+
+    /// Iterate over compiled blocks: yields (start_pc, end_pc, num_words).
+    pub fn block_sizes(&self) -> Vec<(u32, u32, u32)> {
+        self.cache
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, b)| {
+                b.as_ref()
+                    .map(|b| (pc as u32, b.end_pc, b.end_pc - pc as u32))
+            })
+            .collect()
     }
 
     /// Invalidate all cached blocks and release compiled code memory.
@@ -244,9 +268,11 @@ impl JitEngine {
     }
 
     /// Get a cached compiled instruction or compile and cache it.
-    /// Keyed by (pc, opcode, next_word) for self-modifying code correctness:
-    /// if PRAM changes, the key mismatches and we recompile.
-    /// Returns (compiled_fn, instruction_length).
+    ///
+    /// Cache key optimizations to maximize sharing:
+    /// - PC-independent instructions use `pc_key=0` (one compilation serves all addresses)
+    /// - Single-word instructions use `nw_key=0` (next_word is irrelevant)
+    /// - PC-dependent instructions (branches, DO loops, LRA) include the actual PC
     pub fn get_or_compile_instruction(
         &mut self,
         pc: u32,
@@ -254,15 +280,86 @@ impl JitEngine {
         next_word: u32,
         map: &MemoryMap,
     ) -> (CompiledFn, u32) {
-        let key = (pc, opcode, next_word);
+        let inst = decode::decode(opcode);
+        let inst_len = decode::instruction_length(&inst);
+        let pc_key = if Self::instruction_uses_pc(&inst) {
+            pc
+        } else {
+            0
+        };
+        let nw_key = if inst_len > 1 { next_word } else { 0 };
+        let key = (pc_key, opcode, nw_key);
         if let Some(&entry) = self.instr_cache.get(&key) {
             return entry;
         }
-        let inst = decode::decode(opcode);
-        let inst_len = decode::instruction_length(&inst);
         let func = self.compile_instruction(&inst, pc, next_word, map);
         self.instr_cache.insert(key, (func, inst_len));
         (func, inst_len)
+    }
+
+    /// Returns true if the instruction's compiled code depends on PC.
+    fn instruction_uses_pc(inst: &Instruction) -> bool {
+        matches!(
+            inst,
+            Instruction::Bra { .. }
+                | Instruction::BraLong
+                | Instruction::BraRn { .. }
+                | Instruction::Bcc { .. }
+                | Instruction::BccLong { .. }
+                | Instruction::BccRn { .. }
+                | Instruction::Bsr { .. }
+                | Instruction::BsrLong
+                | Instruction::BsrRn { .. }
+                | Instruction::Bscc { .. }
+                | Instruction::BsccLong { .. }
+                | Instruction::BsccRn { .. }
+                | Instruction::Jsr { .. }
+                | Instruction::JsrEa { .. }
+                | Instruction::Jscc { .. }
+                | Instruction::JsccEa { .. }
+                | Instruction::DoImm { .. }
+                | Instruction::DoReg { .. }
+                | Instruction::DoAa { .. }
+                | Instruction::DoEa { .. }
+                | Instruction::DoForever
+                | Instruction::DorImm { .. }
+                | Instruction::DorReg { .. }
+                | Instruction::DorAa { .. }
+                | Instruction::DorEa { .. }
+                | Instruction::DorForever
+                | Instruction::LraRn { .. }
+                | Instruction::LraDisp { .. }
+                | Instruction::BrclrEa { .. }
+                | Instruction::BrclrAa { .. }
+                | Instruction::BrclrPp { .. }
+                | Instruction::BrclrQq { .. }
+                | Instruction::BrclrReg { .. }
+                | Instruction::BrsetEa { .. }
+                | Instruction::BrsetAa { .. }
+                | Instruction::BrsetPp { .. }
+                | Instruction::BrsetQq { .. }
+                | Instruction::BrsetReg { .. }
+                | Instruction::BsclrEa { .. }
+                | Instruction::BsclrAa { .. }
+                | Instruction::BsclrPp { .. }
+                | Instruction::BsclrQq { .. }
+                | Instruction::BsclrReg { .. }
+                | Instruction::BssetEa { .. }
+                | Instruction::BssetAa { .. }
+                | Instruction::BssetPp { .. }
+                | Instruction::BssetQq { .. }
+                | Instruction::BssetReg { .. }
+                | Instruction::JsclrEa { .. }
+                | Instruction::JsclrAa { .. }
+                | Instruction::JsclrPp { .. }
+                | Instruction::JsclrQq { .. }
+                | Instruction::JsclrReg { .. }
+                | Instruction::JssetEa { .. }
+                | Instruction::JssetAa { .. }
+                | Instruction::JssetPp { .. }
+                | Instruction::JssetQq { .. }
+                | Instruction::JssetReg { .. }
+        )
     }
 
     /// Compile a single decoded instruction into a callable function.
@@ -569,15 +666,25 @@ mod tests {
         let mut yram = [0u32; YRAM_SIZE];
         let mut pram = [0u32; PRAM_SIZE];
         let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-        // Two separate instructions at different PCs
-        pram[0] = 0x0C0010; // jmp $10
-        pram[0x10] = 0x000000; // nop
-        run_one(&mut s, &mut jit); // compiles+runs jmp at pc=0
-        run_one(&mut s, &mut jit); // compiles+runs nop at pc=0x10
+        // Use JSCLR (PC-dependent: embeds pc+2 as return address) at two PCs.
+        // jsclr #0,X0,$100: opcode=0x0BC400, next_word=0x000100
+        pram[0x00] = 0x0BC400;
+        pram[0x01] = 0x000100;
+        pram[0x10] = 0x0BC400;
+        pram[0x11] = 0x000100;
+        s.registers[reg::X0] = 0x000001; // bit 0 set -> not taken
+        s.pc = 0;
+        run_one(&mut s, &mut jit); // compiles jsclr at pc=0
+        s.pc = 0x10;
+        run_one(&mut s, &mut jit); // compiles jsclr at pc=0x10
 
-        // Invalidate range [0, 1] - should only affect block at PC=0
+        // Both should be cached with their actual PCs (PC-dependent)
+        assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x00));
+        assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x10));
+
+        // Invalidate range [0, 1] - should only affect instruction at PC=0
         jit.invalidate_range(0, 1);
-        // Block at 0x10 should survive
+        assert!(!jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x00));
         assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x10));
     }
 

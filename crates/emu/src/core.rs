@@ -1118,6 +1118,174 @@ pub unsafe extern "C" fn jit_rnd56(state: *mut DspState, val: i64) -> i64 {
     ((r2 as i64) << 48) | ((r1 as i64) << 24) | (r0 as i64)
 }
 
+/// Update E, U, N, Z flags in SR from a 56-bit accumulator value.
+/// Handles all three scaling modes (S1:S0 in SR).
+///
+/// # Safety
+/// `state` must be a valid pointer to a `DspState`.
+pub unsafe extern "C" fn jit_update_nz(state: *mut DspState, acc_val: i64) {
+    let state = unsafe { &mut *state };
+    let sr = state.registers[reg::SR];
+
+    let reg0 = ((acc_val >> 48) & 0xFF) as u32; // extension byte
+    let reg1 = ((acc_val >> 24) & 0xFF_FFFF) as u32; // MSP
+
+    let scaling = (sr >> sr::S0) & 3;
+
+    let (e, u) = match scaling {
+        0 => {
+            // No scaling
+            let val_e = ((reg0 << 1) | (reg1 >> 23)) & 0x1FF;
+            let e = val_e != 0 && val_e != 0x1FF;
+            let bits = reg1 & 0xC0_0000;
+            let u = bits == 0 || bits == 0xC0_0000;
+            (e, u)
+        }
+        1 => {
+            // Scale down (S1:S0=01)
+            let e = reg0 != 0 && reg0 != 0xFF;
+            let val = ((reg0 << 1) | (reg1 >> 23)) & 3;
+            let u = val == 0 || val == 3;
+            (e, u)
+        }
+        2 => {
+            // Scale up (S1:S0=10)
+            let val_e = ((reg0 << 2) | (reg1 >> 22)) & 0x3FF;
+            let e = val_e != 0 && val_e != 0x3FF;
+            let bits = reg1 & 0x60_0000;
+            let u = bits == 0 || bits == 0x60_0000;
+            (e, u)
+        }
+        _ => (false, false), // scaling=3: no change
+    };
+
+    let n = (acc_val >> 55) & 1 != 0;
+    let z = (acc_val & 0x00FF_FFFF_FFFF_FFFF) == 0;
+
+    let clear_mask = !((1u32 << sr::E) | (1u32 << sr::U) | (1u32 << sr::N) | (1u32 << sr::Z));
+    let mut new_sr = sr & clear_mask;
+    if e {
+        new_sr |= 1 << sr::E;
+    }
+    if u {
+        new_sr |= 1 << sr::U;
+    }
+    if n {
+        new_sr |= 1 << sr::N;
+    }
+    if z {
+        new_sr |= 1 << sr::Z;
+    }
+    state.registers[reg::SR] = new_sr;
+}
+
+/// Arithmetic Saturation Mode: clamp a 56-bit accumulator if SM=1.
+/// Returns the result with bit 56 set if saturation was needed (needs_sat flag).
+/// Bits 55:0 contain the (possibly clamped) value.
+///
+/// # Safety
+/// `state` must be a valid pointer to a `DspState`.
+pub unsafe extern "C" fn jit_saturate_sm(state: *mut DspState, val: i64) -> i64 {
+    let state = unsafe { &*state };
+    let sr = state.registers[reg::SR];
+    if sr & (1 << sr::SM) == 0 {
+        return val; // SM=0: no saturation, needs_sat=0 (bit 56 clear)
+    }
+    let b55 = (val >> 55) & 1;
+    let b48 = (val >> 48) & 1;
+    let b47 = (val >> 47) & 1;
+    let mismatch = (b55 ^ b48) | (b48 ^ b47);
+    if mismatch == 0 {
+        return val; // No saturation needed
+    }
+    // Saturate: bit 55 = 0 -> max positive, 1 -> max negative
+    let saturated = if b55 != 0 {
+        0x00FF_8000_0000_0000_u64 as i64
+    } else {
+        0x0000_7FFF_FFFF_FFFF_i64
+    };
+    saturated | (1i64 << 56) // Set needs_sat flag in bit 56
+}
+
+/// Read accumulator as 24-bit value with scaling, limiting, and S flag update.
+///
+/// Returns the 24-bit result in bits [23:0]. Bit 24 is the `no_limit` flag
+/// (1 = value was not clamped). Updates SR.L and SR.S in-place.
+///
+/// `acc_idx`: 0 = A, 1 = B (index into sub-register triples)
+///
+/// # Safety
+/// `state` must be a valid pointer to a `DspState`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jit_read_accu24(state: *mut DspState, acc_idx: u32) -> u32 {
+    let state = unsafe { &mut *state };
+    let (a2, a1, a0) = if acc_idx == 0 {
+        (
+            state.registers[reg::A2],
+            state.registers[reg::A1],
+            state.registers[reg::A0],
+        )
+    } else {
+        (
+            state.registers[reg::B2],
+            state.registers[reg::B1],
+            state.registers[reg::B0],
+        )
+    };
+
+    let sr = state.registers[reg::SR];
+    let scaling = (sr >> sr::S0) & 3;
+
+    // Apply data shifter
+    let combined = (a2 << 24) | a1;
+    let value = match scaling {
+        1 => combined >> 1,                      // scale down
+        2 => (combined << 1) | ((a0 >> 23) & 1), // scale up
+        _ => combined,                           // no scaling
+    } & 0x00FF_FFFF;
+
+    // Limiting check
+    let ok_pos = a2 == 0 && value <= 0x7F_FFFF;
+    let ok_neg = a2 == 0xFF && value >= 0x80_0000;
+    let mut no_limit = ok_pos || ok_neg;
+
+    // Scale-up fix: bit 47 (A1[23]) must match A2 sign at extension boundary
+    if scaling == 2 {
+        let a1_bit23 = (a1 >> 23) & 1;
+        let ok_pos_s2 = a2 == 0 && value <= 0x7F_FFFF && a1_bit23 == 0;
+        let ok_neg_s2 = a2 == 0xFF && value >= 0x80_0000 && a1_bit23 != 0;
+        no_limit = ok_pos_s2 || ok_neg_s2;
+    }
+
+    let result = if no_limit {
+        value
+    } else {
+        // Clamp: negative (A2 bit 7 set) -> 0x800000, positive -> 0x7FFFFF
+        if a2 & 0x80 != 0 { 0x80_0000 } else { 0x7F_FFFF }
+    };
+
+    // Update SR: set L if limited, compute S flag (sticky data growth)
+    let mut new_sr = sr;
+    if !no_limit {
+        new_sr |= 1 << sr::L;
+    }
+
+    // S flag: adjacent bits differ in the unscaled accumulator
+    let acc_packed =
+        ((a2 as u64 & 0xFF) << 48) | ((a1 as u64 & 0xFF_FFFF) << 24) | (a0 as u64 & 0xFF_FFFF);
+    let s_bit = match scaling {
+        1 => ((acc_packed >> 45) ^ (acc_packed >> 44)) & 1, // scale down
+        2 => ((acc_packed >> 47) ^ (acc_packed >> 46)) & 1, // scale up
+        _ => ((acc_packed >> 46) ^ (acc_packed >> 45)) & 1, // no scaling
+    };
+    if s_bit != 0 {
+        new_sr |= 1 << sr::S;
+    }
+    state.registers[reg::SR] = new_sr;
+
+    result | (if no_limit { 1 << 24 } else { 0 })
+}
+
 impl Default for DspState {
     fn default() -> Self {
         Self::new(MemoryMap::default())

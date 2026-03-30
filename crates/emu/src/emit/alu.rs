@@ -130,8 +130,7 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_alu_tst(&mut self, d: Accumulator) {
         let acc = self.load_acc(d);
         let acc = self.mask56(acc);
-        self.update_nz(acc);
-        self.clear_v_flag();
+        self.set_flags_nz_clear_v(acc);
     }
 
     pub(super) fn emit_alu_tfr_acc(&mut self, src: Accumulator, dst: Accumulator) {
@@ -192,17 +191,14 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(result);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(d, result56);
-        self.update_nz(result56);
         // NEG: V set only if value is most negative (0x80_000000_000000)
-        // C is NOT modified
         let most_neg = self
             .builder
             .ins()
             .iconst(types::I64, 0x80000000000000u64 as i64);
         let is_most_neg = self.builder.ins().icmp(IntCC::Equal, acc, most_neg);
         let overflow = self.builder.ins().uextend(types::I32, is_most_neg);
-        self.set_vl_overflow(overflow);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_vl_sm(result56, overflow);
     }
 
     pub(super) fn emit_alu_abs(&mut self, d: Accumulator) {
@@ -221,17 +217,13 @@ impl<'a> Emitter<'a> {
         let result = self.builder.ins().select(is_neg, negated56, acc);
         let result = self.emit_saturate_sm(result);
         self.store_acc(d, result);
-        self.update_nz(result);
         // ABS: V/L from subtraction overflow (when negative), C is NOT modified.
-        // Overflow only occurs for most negative value (0x80_000000_000000).
-        // When positive, V/L = 0.
         let sign_r = self.extract_bit_i64(negated56, 55);
         let one = self.builder.ins().iconst(types::I32, 1);
         let sign_d = self.builder.ins().band(sign32, one);
         let raw_overflow = self.builder.ins().band(sign_d, sign_r);
         let overflow = self.builder.ins().select(is_neg, raw_overflow, zero32);
-        self.set_vl_overflow(overflow);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_vl_sm(result, overflow);
     }
 
     /// Sign-extend a 56-bit value packed in i64 to a proper 64-bit signed value.
@@ -261,8 +253,7 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(result);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(d, result56);
-        self.update_nz(result56);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_sm(result56);
     }
 
     pub(super) fn emit_alu_asl(&mut self, d: Accumulator) {
@@ -283,8 +274,7 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(shifted);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(d, result56);
-        self.update_nz(result56);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_sm(result56);
     }
 
     /// ADDR: Arithmetic shift right dest by 1, then add source accumulator.
@@ -311,13 +301,7 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(result);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(dst, result56);
-        self.update_nz(result56);
-        if is_sub {
-            self.update_vcl_sub(s, d_shifted, result);
-        } else {
-            self.update_vcl_add(s, d_shifted, result);
-        }
-        self.emit_sm_vl_deferred();
+        self.set_flags_addsub(result56, s, d_shifted, result, is_sub);
     }
 
     /// ADDL: logical shift-left dest by 1, then add source to dest.
@@ -349,15 +333,7 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(result);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(dst, result56);
-        self.update_nz(result56);
-        if is_sub {
-            self.update_vcl_sub(s, d_shifted, result);
-        } else {
-            self.update_vcl_add(s, d_shifted, result);
-        }
-        // XOR shift carry into C (not OR); OR shift overflow into V and L
-        self.xor_c_or_vl(asl_carry, asl_v);
-        self.emit_sm_vl_deferred();
+        self.set_flags_addl_subl(result56, s, d_shifted, result, is_sub, asl_carry, asl_v);
     }
 
     /// XOR `carry` into SR.C, OR `overflow` into SR.V and SR.L.
@@ -403,13 +379,7 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(result);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(d, result56);
-        self.update_nz(result56);
-        if is_sub {
-            self.update_vcl_sub(src56, dst, result);
-        } else {
-            self.update_vcl_add(src56, dst, result);
-        }
-        self.emit_sm_vl_deferred();
+        self.set_flags_addsub(result56, src56, dst, result, is_sub);
     }
 
     /// Helper: compute absolute value of a 56-bit accumulator value.
@@ -433,8 +403,7 @@ impl<'a> Emitter<'a> {
         let abs_d = self.abs56(d);
         let result = self.builder.ins().isub(abs_d, abs_s);
         let result56 = self.mask56(result);
-        self.update_nz(result56);
-        self.update_vcl_sub(abs_s, abs_d, result);
+        self.set_flags_nz_vcl_sub(result56, abs_s, abs_d, result);
     }
 
     /// CMPM with 24-bit register source: |reg| - |D|, update flags, don't store.
@@ -445,8 +414,7 @@ impl<'a> Emitter<'a> {
         let abs_d = self.abs56(dst);
         let result = self.builder.ins().isub(abs_d, abs_s);
         let result56 = self.mask56(result);
-        self.update_nz(result56);
-        self.update_vcl_sub(abs_s, abs_d, result);
+        self.set_flags_nz_vcl_sub(result56, abs_s, abs_d, result);
     }
 
     /// RND: Convergent round accumulator based on SR scaling mode.
@@ -547,9 +515,7 @@ impl<'a> Emitter<'a> {
         let result_sign = self.extract_bit_i64(result, 55);
         let sign_changed = self.builder.ins().bxor(orig_sign, result_sign);
         let v_overflow = self.builder.ins().band(sign_changed, result_sign);
-        self.set_vl_overflow(v_overflow);
-        self.update_nz(result);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_vl_sm(result, v_overflow);
     }
 
     /// MAX: If B - A <= 0 (i.e., A >= B), copy A -> B. C cleared on transfer, set otherwise.
@@ -642,9 +608,7 @@ impl<'a> Emitter<'a> {
         let result56 = self.emit_alu_mpy_core(s1, s2, negate);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(d, result56);
-        self.update_nz(result56);
-        self.clear_v_flag();
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_clear_v_sm(result56);
     }
 
     pub(super) fn emit_alu_mpyr(&mut self, s1: usize, s2: usize, d: Accumulator, negate: bool) {
@@ -652,9 +616,7 @@ impl<'a> Emitter<'a> {
         let rounded = self.emit_rnd56(result56);
         let rounded = self.emit_saturate_sm(rounded);
         self.store_acc(d, rounded);
-        self.update_nz(rounded);
-        self.clear_v_flag();
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_clear_v_sm(rounded);
     }
 
     pub(super) fn emit_alu_mac(&mut self, s1: usize, s2: usize, d: Accumulator, negate: bool) {
@@ -662,24 +624,22 @@ impl<'a> Emitter<'a> {
         let acc = self.load_acc(d);
         let sum = self.builder.ins().iadd(acc, result56);
         let sum56 = self.mask56(sum);
-        let sum56 = self.emit_saturate_sm(sum56);
-        self.store_acc(d, sum56);
-        self.update_nz(sum56);
-        self.mac_set_vl(result56, acc, sum56);
-        self.emit_sm_vl_deferred();
+        let saturated = self.emit_saturate_sm(sum56);
+        self.store_acc(d, saturated);
+        self.set_flags_mac_vl_sm(sum56, result56, acc);
     }
 
     pub(super) fn emit_alu_macr(&mut self, s1: usize, s2: usize, d: Accumulator, negate: bool) {
-        let result56 = self.emit_alu_mpy_core(s1, s2, negate);
+        let product = self.emit_alu_mpy_core(s1, s2, negate);
         let acc = self.load_acc(d);
-        let sum = self.builder.ins().iadd(acc, result56);
+        let sum = self.builder.ins().iadd(acc, product);
         let sum56 = self.mask56(sum);
         let rounded = self.emit_rnd56(sum56);
-        let rounded = self.emit_saturate_sm(rounded);
-        self.store_acc(d, rounded);
-        self.update_nz(rounded);
-        self.mac_set_vl(result56, acc, sum56);
-        self.emit_sm_vl_deferred();
+        let saturated = self.emit_saturate_sm(rounded);
+        self.store_acc(d, saturated);
+        // MACR "result" is the rounded value (pre-saturation) per manual:
+        // operation is D +/- S1*S2 + r -> D
+        self.set_flags_mac_vl_sm(rounded, product, acc);
     }
 
     /// Emit a call to jit_rnd56(state, val) -> rounded i64.
@@ -726,11 +686,7 @@ impl<'a> Emitter<'a> {
         } else {
             result56
         };
-        self.update_nz(result56);
-        self.update_vcl(src, dst, result, is_sub);
-        if store {
-            self.emit_sm_vl_deferred();
-        }
+        self.set_flags_addsub(result56, src, dst, result, is_sub);
     }
 
     pub(super) fn emit_normf(&mut self, src_reg: usize, d: Accumulator) {
@@ -801,9 +757,7 @@ impl<'a> Emitter<'a> {
         // V is only set for the ASL (left shift) path; ASR always has V=0
         let zero32 = self.builder.ins().iconst(types::I32, 0);
         let v_bit = self.builder.ins().select(is_neg, asl_v_bit, zero32);
-        self.set_vl_overflow(v_bit);
-        self.update_nz(result);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_vl_sm(result, v_bit);
     }
 
     pub(super) fn emit_asl_imm(&mut self, shift: u8, s: Accumulator, d: Accumulator) {
@@ -853,9 +807,7 @@ impl<'a> Emitter<'a> {
         let sr = self.builder.ins().bor(sr, c_shifted);
         let sr = self.or_vl(sr, v_bit);
         self.store_reg(reg::SR, sr);
-
-        self.update_nz(result_m);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_sm(result_m);
     }
 
     pub(super) fn emit_asr_imm(&mut self, shift: u8, s: Accumulator, d: Accumulator) {
@@ -884,9 +836,7 @@ impl<'a> Emitter<'a> {
         let c_shifted = self.shift_to_bit(carry_bit, sr::C);
         let sr = self.builder.ins().bor(sr, c_shifted);
         self.store_reg(reg::SR, sr);
-
-        self.update_nz(result_m);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_sm(result_m);
     }
 
     pub(super) fn emit_asl_reg(&mut self, src_reg: usize, s: Accumulator, d: Accumulator) {
@@ -939,9 +889,7 @@ impl<'a> Emitter<'a> {
         let sr = self.builder.ins().bor(sr, c_shifted);
         let sr = self.or_vl(sr, v_bit);
         self.store_reg(reg::SR, sr);
-
-        self.update_nz(result_m);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_sm(result_m);
     }
 
     pub(super) fn emit_asr_reg(&mut self, src_reg: usize, s: Accumulator, d: Accumulator) {
@@ -975,9 +923,7 @@ impl<'a> Emitter<'a> {
         let c_shifted = self.shift_to_bit(carry_i32, sr::C);
         let sr = self.builder.ins().bor(sr, c_shifted);
         self.store_reg(reg::SR, sr);
-
-        self.update_nz(result_m);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_sm(result_m);
     }
 
     pub(super) fn emit_cmpu(&mut self, src_reg: usize, d: Accumulator) {
@@ -1098,9 +1044,7 @@ impl<'a> Emitter<'a> {
         // V only set when euz path was taken (left shift)
         let euz_i32 = self.builder.ins().uextend(types::I32, is_euz);
         let norm_v = self.builder.ins().band(asl_v_raw, euz_i32);
-        self.set_vl_overflow(norm_v);
-        self.update_nz(result);
-        self.emit_sm_vl_deferred();
+        self.set_flags_nz_vl_sm(result, norm_v);
     }
 
     pub(super) fn emit_mul_shift(
@@ -1143,31 +1087,34 @@ impl<'a> Emitter<'a> {
 
         // MAC/MACR: accumulate; MPY/MPYR: store directly
         let is_mac = matches!(op, MulShiftOp::Mac | MulShiftOp::Macr);
-        let (final_val, mac_acc, mac_sum) = if is_mac {
+        let (final_val, mac_acc, mac_flag_result) = if is_mac {
             let acc = self.load_acc(d);
             let sum = self.builder.ins().iadd(acc, result_m);
             let sum56 = self.mask56(sum);
-            (sum56, Some(acc), Some(sum56))
+            // MACR: round, then use rounded value for flags (operation is D+/-S1*S2+r)
+            // MAC: no rounding, use sum56 for flags
+            if op == MulShiftOp::Macr {
+                let rounded = self.emit_rnd56(sum56);
+                (rounded, Some(acc), Some(rounded))
+            } else {
+                (sum56, Some(acc), Some(sum56))
+            }
         } else {
-            (result_m, None, None)
-        };
-
-        // MPYR/MACR: round
-        let final_val = match op {
-            MulShiftOp::Mpyr | MulShiftOp::Macr => self.emit_rnd56(final_val),
-            _ => final_val,
+            // MPYR: round; MPY: no round
+            let val = match op {
+                MulShiftOp::Mpyr => self.emit_rnd56(result_m),
+                _ => result_m,
+            };
+            (val, None, None)
         };
 
         let final_val = self.emit_saturate_sm(final_val);
         self.store_acc(d, final_val);
-        self.update_nz(final_val);
-
-        if let (Some(acc), Some(sum56)) = (mac_acc, mac_sum) {
-            self.mac_set_vl(result_m, acc, sum56);
+        if let (Some(acc), Some(flag_result)) = (mac_acc, mac_flag_result) {
+            self.set_flags_mac_vl_sm(flag_result, result_m, acc);
         } else {
-            self.clear_v_flag();
+            self.set_flags_nz_clear_v_sm(final_val);
         }
-        self.emit_sm_vl_deferred();
     }
 
     pub(super) fn emit_mpyi(&mut self, k: bool, d: Accumulator, src_reg: usize, next_word: u32) {
@@ -1234,12 +1181,13 @@ impl<'a> Emitter<'a> {
             let sum = self.builder.ins().iadd(acc, product_m);
             let sum_m = self.mask56(sum);
             if round {
+                // MACRI: flags use rounded value (operation is D +/- #xxxx*S + r)
                 let rounded = self.emit_rnd56(sum_m);
-                let rounded = self.emit_saturate_sm(rounded);
-                (rounded, Some((product_m, acc, sum_m)))
+                let saturated = self.emit_saturate_sm(rounded);
+                (saturated, Some((product_m, acc, rounded)))
             } else {
                 let result_m = self.emit_saturate_sm(sum_m);
-                (result_m, Some((product_m, acc, result_m)))
+                (result_m, Some((product_m, acc, sum_m)))
             }
         } else if round {
             let rounded = self.emit_rnd56(product_m);
@@ -1251,14 +1199,11 @@ impl<'a> Emitter<'a> {
         };
 
         self.store_acc(d, final_val);
-        self.update_nz(final_val);
-
-        if let Some((pm, acc, rm)) = vl_info {
-            self.mac_set_vl(pm, acc, rm);
+        if let Some((pm, acc, sum)) = vl_info {
+            self.set_flags_mac_vl_sm(sum, pm, acc);
         } else {
-            self.clear_v_flag();
+            self.set_flags_nz_clear_v_sm(final_val);
         }
-        self.emit_sm_vl_deferred();
     }
 
     pub(super) fn emit_dmac(
@@ -1315,14 +1260,12 @@ impl<'a> Emitter<'a> {
             result_m
         };
         self.store_acc(d, result_m);
-        self.update_nz(result_m);
-
-        // V flag: the manual says V is computed per standard definition, but the
-        // right-shift by 24 reduces D to ~32-bit range while product is ~49-bit max,
-        // so the sum (~49 bits) can never overflow 56 bits. V is always 0.
-        self.clear_v_flag();
+        // V is always 0: the product fits in ~49 bits and D>>24 in ~32 bits,
+        // so their sum cannot overflow 56 bits (2^49 + 2^31 << 2^55).
         if ss == 0 {
-            self.emit_sm_vl_deferred();
+            self.set_flags_nz_clear_v_sm(result_m);
+        } else {
+            self.set_flags_nz_clear_v(result_m);
         }
     }
 
@@ -1364,8 +1307,7 @@ impl<'a> Emitter<'a> {
         let sum = self.builder.ins().iadd(acc, product_m);
         let result_m = self.mask56(sum);
         self.store_acc(d, result_m);
-        self.update_nz(result_m);
-        self.mac_set_vl(product_m, acc, result_m);
+        self.set_flags_dmac_vl(result_m, product_m, acc);
     }
 
     pub(super) fn emit_mpy_su(
@@ -1403,9 +1345,7 @@ impl<'a> Emitter<'a> {
 
         let result_m = self.mask56(product);
         self.store_acc(d, result_m);
-        self.update_nz(result_m);
-
-        self.clear_v_flag();
+        self.set_flags_nz_clear_v(result_m);
     }
 
     pub(super) fn emit_div(&mut self, src_reg: usize, d: Accumulator) {
