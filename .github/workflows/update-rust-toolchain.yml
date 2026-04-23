@@ -1,0 +1,67 @@
+name: Update Rust toolchain
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Monday 9:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Update toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Get current pinned version
+        id: current
+        run: |
+          version=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest stable version
+        id: latest
+        run: |
+          version=$(curl -fsSL https://static.rust-lang.org/dist/channel-rust-stable.toml \
+            | sed -n 's/^version = "\([0-9.]*\).*/\1/p' | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check if update needed
+        id: check
+        run: |
+          if [ "${{ steps.current.outputs.version }}" = "${{ steps.latest.outputs.version }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update rust-toolchain.toml
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          sed -i 's/^channel = .*/channel = "${{ steps.latest.outputs.version }}"/' rust-toolchain.toml
+
+      - name: Install Rust
+        if: steps.check.outputs.skip == 'false'
+        uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1
+
+      - name: Apply formatting and lint fixes
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          cargo fmt --all
+          cargo clippy --workspace --all-targets --fix --allow-dirty
+
+      - name: Create pull request
+        if: steps.check.outputs.skip == 'false'
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e # v7
+        with:
+          branch: ci/rust-toolchain-${{ steps.latest.outputs.version }}
+          commit-message: "ci: Update Rust toolchain to ${{ steps.latest.outputs.version }}"
+          title: "ci: Update Rust toolchain to ${{ steps.latest.outputs.version }}"
+          body: |
+            Updates Rust toolchain from ${{ steps.current.outputs.version }} to ${{ steps.latest.outputs.version }}.
+
+            `cargo fmt` and `cargo clippy --fix` have been applied automatically.
+          labels: ci
