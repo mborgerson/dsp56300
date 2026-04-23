@@ -747,14 +747,13 @@ fn check_warnings(inst: &Instruction) -> Vec<AssembleWarning> {
         }
 
         // SSH as both source and destination in register-to-register move
-        Instruction::MovecReg { src, dst, .. } => {
-            if *src == Register::Ssh && *dst == Register::Ssh {
+        Instruction::MovecReg { src, dst, .. }
+            if *src == Register::Ssh && *dst == Register::Ssh => {
                 warnings.push(warn(
                     WarningKind::SshSourceAndDest,
                     "SSH is both source and destination",
                 ));
             }
-        }
 
         Instruction::MulShift { shift, .. } => {
             if let Some(v) = shift.try_eval_const()
@@ -908,14 +907,13 @@ fn check_parallel_warnings(
                     pm_dsts.push(y_reg);
                 }
             }
-            ParallelMove::Pm0 { acc, ea, .. } => {
+            ParallelMove::Pm0 { acc, ea, .. }
                 // The official assembler only flags DuplicateDestination for Pm0
                 // with simple EA modes (PostInc, PostDec, NoUpdate, PostIncN).
                 // Complex modes (PostDecN, PreDec, Disp, AbsAddr) are silently accepted.
-                if is_simple_ea(ea) {
+                if is_simple_ea(ea) => {
                     pm_dsts.push(acc);
                 }
-            }
             _ => {}
         }
         for dst in &pm_dsts {
@@ -975,14 +973,13 @@ fn check_parallel_warnings(
         }
         | ParallelMove::XYAbs {
             reg, write: true, ..
-        } => {
-            if is_invalid_pm4_dest(reg) {
+        }
+            if is_invalid_pm4_dest(reg) => {
                 warnings.push(warn(
                     WarningKind::InvalidPm4Destination,
                     "invalid PM4 destination register",
                 ));
             }
-        }
         ParallelMove::LImm { reg, .. } => {
             let overlaps_alu = acc_is_a
                 .map(|is_a| reg_overlaps_acc(reg, is_a))
