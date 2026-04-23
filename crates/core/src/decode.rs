@@ -1010,13 +1010,10 @@ pub fn instruction_length(inst: &Instruction) -> u32 {
         | Instruction::MovepQq { ea_mode, .. }
         | Instruction::MovepQqPea { ea_mode, .. }
         | Instruction::MovecEa { ea_mode, .. }
-        | Instruction::MovemEa { ea_mode, .. } => {
-            if (ea_mode >> 3) == 6 {
+        | Instruction::MovemEa { ea_mode, .. }
+            if (ea_mode >> 3) == 6 => {
                 2
-            } else {
-                1
             }
-        }
         Instruction::JmpEa { ea_mode }
         | Instruction::JsrEa { ea_mode }
         | Instruction::JccEa { ea_mode, .. }
@@ -1027,13 +1024,10 @@ pub fn instruction_length(inst: &Instruction) -> u32 {
         | Instruction::BchgEa { ea_mode, .. }
         | Instruction::PlockEa { ea_mode }
         | Instruction::PunlockEa { ea_mode }
-        | Instruction::Vsl { ea_mode, .. } => {
-            if (ea_mode >> 3) == 6 {
+        | Instruction::Vsl { ea_mode, .. }
+            if (ea_mode >> 3) == 6 => {
                 2
-            } else {
-                1
             }
-        }
 
         // Parallel instructions with mode 6 (absolute/immediate from extension word)
         Instruction::Parallel {
