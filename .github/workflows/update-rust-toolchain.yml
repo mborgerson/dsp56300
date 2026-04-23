@@ -20,6 +20,10 @@ jobs:
         id: current
         run: |
           version=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          if [ -z "$version" ] || ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Could not parse current version from rust-toolchain.toml (got: '$version')" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Get latest stable version
@@ -27,6 +31,10 @@ jobs:
         run: |
           version=$(curl -fsSL https://static.rust-lang.org/dist/channel-rust-stable.toml \
             | sed -n 's/^version = "\([0-9.]*\).*/\1/p' | head -1)
+          if [ -z "$version" ] || ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Could not parse latest stable version from channel manifest (got: '$version')" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Check if update needed
