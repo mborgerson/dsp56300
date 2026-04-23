@@ -1209,7 +1209,7 @@ pub unsafe extern "C" fn jit_saturate_sm(state: *mut DspState, val: i64) -> i64 
 
 /// Read accumulator as 24-bit value with scaling, limiting, and S flag update.
 ///
-/// Returns the 24-bit result in bits [23:0]. Bit 24 is the `no_limit` flag
+/// Returns the 24-bit result in bits \[23:0\]. Bit 24 is the `no_limit` flag
 /// (1 = value was not clamped). Updates SR.L and SR.S in-place.
 ///
 /// `acc_idx`: 0 = A, 1 = B (index into sub-register triples)
