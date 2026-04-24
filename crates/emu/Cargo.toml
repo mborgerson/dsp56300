@@ -21,7 +21,7 @@ cranelift-codegen = "0.130"
 cranelift-frontend = "0.130"
 cranelift-jit = "0.130"
 cranelift-module = "0.130"
-cranelift-native = "0.130"
+cranelift-native = "0.131"
 target-lexicon = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }
 
