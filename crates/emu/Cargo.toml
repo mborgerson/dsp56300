@@ -17,7 +17,7 @@ cli = ["dep:clap"]
 
 [dependencies]
 dsp56300-core = { version = "0.1.0", path = "../core" }
-cranelift-codegen = "0.130"
+cranelift-codegen = "0.131"
 cranelift-frontend = "0.130"
 cranelift-jit = "0.131"
 cranelift-module = "0.130"
