@@ -560,7 +560,7 @@ name = "dsp56300-emu"
 version = "0.1.2"
 dependencies = [
  "clap",
- "cranelift-codegen 0.130.1",
+ "cranelift-codegen 0.131.0",
  "cranelift-frontend",
  "cranelift-jit",
  "cranelift-module",
