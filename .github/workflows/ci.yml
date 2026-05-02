@@ -51,7 +51,7 @@ jobs:
         with:
           cache-all-crates: true
 
-      - uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2
+      - uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2
         if: matrix.os == 'ubuntu-latest'
         with:
           tool: cargo-llvm-cov
@@ -117,7 +117,7 @@ jobs:
           cache-all-crates: true
           cache-key: ${{ matrix.target }}
 
-      - uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2
+      - uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2
         with:
           tool: cargo-about
 
