@@ -18,7 +18,7 @@ cli = ["dep:clap"]
 [dependencies]
 dsp56300-core = { version = "0.1.0", path = "../core" }
 logos = "0.16"
-chumsky = "0.12"
+chumsky = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]
