@@ -14,26 +14,46 @@
 /**
  * Region kind tag for C FFI.
  */
-enum Dsp56300Region {
+enum Dsp56300Region
+#if __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // __STDC_VERSION__ >= 202311L
+ {
   DSP56300_REGION_BUFFER = 0,
   DSP56300_REGION_CALLBACK = 1,
 };
+#if __STDC_VERSION__ >= 202311L
+typedef enum Dsp56300Region Dsp56300Region;
+#else
 typedef uint32_t Dsp56300Region;
+#endif // __STDC_VERSION__ >= 202311L
 
 /**
  * FFI-safe memory space enum.
  */
-enum Dsp56300MemSpace {
+enum Dsp56300MemSpace
+#if __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // __STDC_VERSION__ >= 202311L
+ {
   DSP56300_MEM_SPACE_X = 0,
   DSP56300_MEM_SPACE_Y = 1,
   DSP56300_MEM_SPACE_P = 2,
 };
+#if __STDC_VERSION__ >= 202311L
+typedef enum Dsp56300MemSpace Dsp56300MemSpace;
+#else
 typedef uint32_t Dsp56300MemSpace;
+#endif // __STDC_VERSION__ >= 202311L
 
 /**
  * Register file indices (6-bit DDDDDD encoding per DSP56300 instruction set).
  */
-enum Dsp56300Reg {
+enum Dsp56300Reg
+#if __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // __STDC_VERSION__ >= 202311L
+ {
   DSP56300_REG_X0 = 4,
   DSP56300_REG_X1 = 5,
   DSP56300_REG_Y0 = 6,
@@ -81,7 +101,11 @@ enum Dsp56300Reg {
   DSP56300_REG_LC = 63,
   DSP56300_REG_COUNT = 64,
 };
+#if __STDC_VERSION__ >= 202311L
+typedef enum Dsp56300Reg Dsp56300Reg;
+#else
 typedef uint32_t Dsp56300Reg;
+#endif // __STDC_VERSION__ >= 202311L
 
 /**
  * Opaque handle to a DSP instance with JIT engine.
