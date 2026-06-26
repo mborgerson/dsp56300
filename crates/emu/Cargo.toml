@@ -20,7 +20,7 @@ dsp56300-core = { version = "0.1.0", path = "../core" }
 cranelift-codegen = "0.132.0"
 cranelift-frontend = "0.132.0"
 cranelift-jit = "0.132.0"
-cranelift-module = "0.132.0"
+cranelift-module = "0.133.1"
 cranelift-native = "0.132.0"
 target-lexicon = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }
