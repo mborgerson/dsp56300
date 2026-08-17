@@ -952,10 +952,9 @@ impl ParallelAlu {
                 let d = parse_acc(ops[2])?;
                 let (negate, s1_str) = if let Some(rest) = ops[0].strip_prefix('-') {
                     (true, rest)
-                } else if let Some(rest) = ops[0].strip_prefix('+') {
-                    (false, rest)
                 } else {
-                    return None;
+                    let rest = ops[0].strip_prefix('+')?;
+                    (false, rest)
                 };
                 let (s1, s2) = parse_qqq_pair(s1_str, ops[1])?;
                 match mnemonic {
