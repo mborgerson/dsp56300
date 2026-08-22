@@ -548,7 +548,7 @@ dependencies = [
  "cranelift-codegen 0.133.1",
  "cranelift-control 0.133.1",
  "cranelift-entity 0.133.1",
- "cranelift-module 0.133.1",
+ "cranelift-module",
  "cranelift-native 0.133.1",
  "libc",
  "log",
@@ -557,17 +557,6 @@ dependencies = [
  "target-lexicon",
  "wasmtime-internal-jit-icache-coherence",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "cranelift-module"
-version = "0.132.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28f05d9efce7a4e8c2ceec49c76d26e53f1ee8cb13de822b6ca5118d48f50976"
-dependencies = [
- "anyhow",
- "cranelift-codegen 0.132.0",
- "cranelift-control 0.132.0",
 ]
 
 [[package]]
@@ -689,7 +678,7 @@ dependencies = [
  "cranelift-codegen 0.132.0",
  "cranelift-frontend",
  "cranelift-jit",
- "cranelift-module 0.132.0",
+ "cranelift-module",
  "cranelift-native 0.134.3",
  "dsp56300-core",
  "target-lexicon",
