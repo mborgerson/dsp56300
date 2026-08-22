@@ -540,16 +540,16 @@ checksum = "b6a658670f779afc2df083be201ebe54805f69b7b9ffa8dab04142b72ed751c9"
 
 [[package]]
 name = "cranelift-jit"
-version = "0.132.0"
+version = "0.133.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b48c2a0720c7d62aadd508c662b9bf666b614a47a888589e553e0511620635e"
+checksum = "acac8da2c71d03c39756866a4bbf31f43d912f054cf9cbbaacc33bf80360366a"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.132.0",
- "cranelift-control 0.132.0",
- "cranelift-entity 0.132.0",
- "cranelift-module",
- "cranelift-native 0.132.0",
+ "cranelift-codegen 0.133.1",
+ "cranelift-control 0.133.1",
+ "cranelift-entity 0.133.1",
+ "cranelift-module 0.133.1",
+ "cranelift-native 0.133.1",
  "libc",
  "log",
  "memmap2",
@@ -571,12 +571,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "cranelift-native"
-version = "0.132.0"
+name = "cranelift-module"
+version = "0.133.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a40053f5cb925451dd1d57393d14ad3145c8e0786701c27b5415ebb9a3ba4f"
+checksum = "dcbbdbe0c3c6cd97359ac2f6744187e89a48e202674e24200afc653f6aa9b7c2"
 dependencies = [
- "cranelift-codegen 0.132.0",
+ "anyhow",
+ "cranelift-codegen 0.133.1",
+ "cranelift-control 0.133.1",
+]
+
+[[package]]
+name = "cranelift-native"
+version = "0.133.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d506ef23a60715bde451b06620b14402166ded3b648454fccbf04f3e46a4aa70"
+dependencies = [
+ "cranelift-codegen 0.133.1",
  "libc",
  "target-lexicon",
 ]
@@ -678,7 +689,7 @@ dependencies = [
  "cranelift-codegen 0.132.0",
  "cranelift-frontend",
  "cranelift-jit",
- "cranelift-module",
+ "cranelift-module 0.132.0",
  "cranelift-native 0.134.3",
  "dsp56300-core",
  "target-lexicon",
@@ -1344,13 +1355,13 @@ dependencies = [
 
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
-version = "45.0.0"
+version = "46.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a312ba8bb77955dcd44294a223e7f124c3071ff966583d385d3f6a4639c62e3"
+checksum = "eba651d44ab0faad4c58106b3adb45068189fb65ef50f0c404b6d9e3bf81a357"
 dependencies = [
  "cfg-if",
  "libc",
- "wasmtime-internal-core 45.0.0",
+ "wasmtime-internal-core 46.0.1",
  "windows-sys 0.61.2",
 ]
 
