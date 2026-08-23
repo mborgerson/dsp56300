@@ -426,7 +426,7 @@ impl<'a> Emitter<'a> {
 
         // Extract 24-bit result and no_limit flag from packed return value
         let result = self.mask24(raw);
-        let no_limit = self.builder.ins().ushr_imm(raw, 24);
+        let no_limit = self.builder.ins().ushr_imm_u(raw, 24);
 
         (result, no_limit)
     }
@@ -507,7 +507,7 @@ impl<'a> Emitter<'a> {
         let bit23 = self.builder.ins().ushr(save_lx, c23);
         let one = self.builder.ins().iconst(types::I32, 1);
         let bit23 = self.builder.ins().band(bit23, one);
-        let is_neg = self.builder.ins().icmp_imm(IntCC::NotEqual, bit23, 0);
+        let is_neg = self.builder.ins().icmp_imm_s(IntCC::NotEqual, bit23, 0);
         let zero = self.builder.ins().iconst(types::I32, 0);
         let all_ones = self.builder.ins().iconst(types::I32, 0x00FF_FFFF);
         let limited_ly = self.builder.ins().select(is_neg, zero, all_ones);
