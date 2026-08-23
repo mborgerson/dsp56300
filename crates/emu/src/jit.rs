@@ -385,7 +385,8 @@ impl JitEngine {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
             emitter.emit_instruction(inst, pc, next_word);
-            emitter.finalize_and_return();
+            let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
+            emitter.finalize_and_return(frontend_config);
         }
 
         self.finalize_function(&format!("dsp_inst_{:04x}", pc))
@@ -417,7 +418,8 @@ impl JitEngine {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
             end_pc = emitter.emit_block(start_pc, MAX_BLOCK_LEN, stop_pc);
-            emitter.finalize_and_return();
+            let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
+            emitter.finalize_and_return(frontend_config);
         }
 
         let label = format!("dsp_block_{:04x}_{:04x}", start_pc, end_pc);

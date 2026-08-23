@@ -8,7 +8,7 @@ impl<'a> Emitter<'a> {
         let byte_off = (idx as i64) * 4;
         self.builder
             .ins()
-            .load(types::I32, MemFlags::trusted(), base_val, byte_off as i32)
+            .load(types::I32, MemFlagsData::trusted(), base_val, byte_off as i32)
     }
 
     /// Emit an inline store to a Buffer region at a constant address.
@@ -17,7 +17,7 @@ impl<'a> Emitter<'a> {
         let byte_off = (idx as i64) * 4;
         self.builder
             .ins()
-            .store(MemFlags::trusted(), val, base_val, byte_off as i32);
+            .store(MemFlagsData::trusted(), val, base_val, byte_off as i32);
     }
 
     /// Compute the native address of `base[(addr - adj) as usize]` where
@@ -56,7 +56,7 @@ impl<'a> Emitter<'a> {
         let elem_addr = self.emit_buffer_elem_addr(base, start, offset, addr);
         self.builder
             .ins()
-            .load(types::I32, MemFlags::trusted(), elem_addr, 0)
+            .load(types::I32, MemFlagsData::trusted(), elem_addr, 0)
     }
 
     /// Emit an inline store to a Buffer region at a dynamic address.
@@ -71,7 +71,7 @@ impl<'a> Emitter<'a> {
         let elem_addr = self.emit_buffer_elem_addr(base, start, offset, addr);
         self.builder
             .ins()
-            .store(MemFlags::trusted(), val, elem_addr, 0);
+            .store(MemFlagsData::trusted(), val, elem_addr, 0);
     }
 
     /// Emit an indirect call to a Callback region's read function.
