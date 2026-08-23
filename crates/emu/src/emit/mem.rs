@@ -6,9 +6,12 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_buffer_load(&mut self, base: *mut u32, idx: u32) -> Value {
         let base_val = self.builder.ins().iconst(self.ptr_ty, base as i64);
         let byte_off = (idx as i64) * 4;
-        self.builder
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), base_val, byte_off as i32)
+        self.builder.ins().load(
+            types::I32,
+            MemFlagsData::trusted(),
+            base_val,
+            byte_off as i32,
+        )
     }
 
     /// Emit an inline store to a Buffer region at a constant address.
@@ -34,9 +37,9 @@ impl<'a> Emitter<'a> {
         let index = if adj == 0 {
             addr
         } else {
-            self.builder.ins().iadd_imm(addr, -(adj as i64))
+            self.builder.ins().iadd_imm_s(addr, -(adj as i64))
         };
-        let byte_off = self.builder.ins().ishl_imm(index, 2);
+        let byte_off = self.builder.ins().ishl_imm_u(index, 2);
         let byte_off_ext = if self.ptr_ty == types::I64 {
             self.builder.ins().uextend(types::I64, byte_off)
         } else {
@@ -312,10 +315,10 @@ impl<'a> Emitter<'a> {
             let lt_end =
                 self.builder
                     .ins()
-                    .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
+                    .icmp_imm_u(IntCC::UnsignedLessThan, addr, region.end as i64);
             self.builder.ins().brif(lt_end, hit, &[], miss, &[]);
         } else {
-            let ge_start = self.builder.ins().icmp_imm(
+            let ge_start = self.builder.ins().icmp_imm_u(
                 IntCC::UnsignedGreaterThanOrEqual,
                 addr,
                 region.start as i64,
@@ -323,7 +326,7 @@ impl<'a> Emitter<'a> {
             let lt_end =
                 self.builder
                     .ins()
-                    .icmp_imm(IntCC::UnsignedLessThan, addr, region.end as i64);
+                    .icmp_imm_u(IntCC::UnsignedLessThan, addr, region.end as i64);
             let in_range = self.builder.ins().band(ge_start, lt_end);
             self.builder.ins().brif(in_range, hit, &[], miss, &[]);
         }

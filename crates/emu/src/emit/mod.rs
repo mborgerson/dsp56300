@@ -1553,13 +1553,13 @@ impl<'a> Emitter<'a> {
 
     /// Extract the 4-bit counter from SP (bits 3:0).
     fn sp_counter(&mut self, sp: Value) -> Value {
-        self.builder.ins().band_imm(sp, 0xF)
+        self.builder.ins().band_imm_u(sp, 0xF)
     }
 
     /// Compute the address of `state.stack[is_ssl][idx & 0xF]`.
     fn stack_slot_addr(&mut self, idx: Value, is_ssl: bool) -> Value {
         let base_off = if is_ssl { OFF_STACK + 64 } else { OFF_STACK } as i64;
-        let masked = self.builder.ins().band_imm(idx, 0xF);
+        let masked = self.builder.ins().band_imm_u(idx, 0xF);
         let four = self.builder.ins().iconst(self.ptr_ty, 4);
         let idx_ext = self.builder.ins().uextend(self.ptr_ty, masked);
         let byte_off = self.builder.ins().imul(idx_ext, four);
