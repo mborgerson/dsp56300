@@ -18,9 +18,9 @@ cli = ["dep:clap"]
 [dependencies]
 dsp56300-core = { version = "0.1.0", path = "../core" }
 cranelift-codegen = "0.134.3"
-cranelift-frontend = "0.133.1"
-cranelift-jit = "0.133.1"
-cranelift-module = "0.133.1"
+cranelift-frontend = "0.134.3"
+cranelift-jit = "0.134.3"
+cranelift-module = "0.134.3"
 cranelift-native = "0.134.3"
 target-lexicon = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }

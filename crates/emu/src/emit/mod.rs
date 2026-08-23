@@ -8,9 +8,9 @@ use std::mem::offset_of;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    self, AbiParam, Block, BlockArg, InstBuilder, MemFlags, Signature, Value, types,
+    self, AbiParam, Block, BlockArg, InstBuilder, MemFlagsData, Signature, Value, types,
 };
-use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, Variable};
 
 /// The calling convention used by `extern "C"` functions on the host platform.
@@ -1178,7 +1178,7 @@ impl<'a> Emitter<'a> {
 
     /// Emit a return instruction and finalize the function.
     /// Pops the entry scope and emits deferred loads in the entry pre-block.
-    pub fn finalize_and_return(mut self) {
+    pub fn finalize_and_return(mut self, frontend_config: TargetFrontendConfig) {
         // Flush any deferred flag computation before writing registers to memory.
         self.flush_pending_flags();
         // Finalize the current (instructions) block.
@@ -1205,7 +1205,7 @@ impl<'a> Emitter<'a> {
         }
         self.builder.ins().jump(self.instructions_block, &[]);
         self.builder.seal_block(self.instructions_block);
-        self.builder.finalize();
+        self.builder.finalize(frontend_config);
     }
 
     /// Returns true if the instruction is a block terminator (branches,
@@ -1473,8 +1473,8 @@ impl<'a> Emitter<'a> {
 
     // helpers: DspState field access
 
-    fn flags() -> MemFlags {
-        MemFlags::trusted()
+    fn flags() -> MemFlagsData {
+        MemFlagsData::trusted()
     }
 
     fn reg_offset(idx: usize) -> i32 {
