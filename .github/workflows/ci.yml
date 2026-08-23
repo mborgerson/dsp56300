@@ -107,8 +107,10 @@ jobs:
           LLVM_MINGW_URL: "https://github.com/mstorsjo/llvm-mingw/releases/download/20250305/llvm-mingw-20250305-ucrt-ubuntu-20.04-x86_64.tar.xz"
         run: |
           curl -fsSL "$LLVM_MINGW_URL" | sudo tar xJ -C /opt
-          echo "/opt/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64/bin" >> "$GITHUB_PATH"
+          LLVM_MINGW_PREFIX="/opt/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64"
+          echo "${LLVM_MINGW_PREFIX}/bin" >> "$GITHUB_PATH"
           echo "CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER=aarch64-w64-mingw32-clang" >> "$GITHUB_ENV"
+          echo "LLVM_MINGW_PREFIX=${LLVM_MINGW_PREFIX}" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -139,6 +141,13 @@ jobs:
           for name in dsp56300-asm dsp56300-disasm dsp56300-emu; do
             cp "$RELEASE/$name" "$STAGING/bin/" 2>/dev/null || cp "$RELEASE/$name.exe" "$STAGING/bin/"
           done
+          case "${{ matrix.target }}" in
+            *-windows-gnullvm)
+              arch="${{ matrix.target }}"
+              arch="${arch%%-*}"
+              cp "${LLVM_MINGW_PREFIX}/${arch}-w64-mingw32/bin/libunwind.dll" "$STAGING/bin/"
+              ;;
+          esac
           cp "$RELEASE"/libdsp56300_emu_ffi.a "$STAGING/lib/"
           cp crates/emu-ffi/include/dsp56300.h "$STAGING/include/"
           cargo about generate -c about.toml -m crates/asm/Cargo.toml about.hbs -o "$STAGING/THIRDPARTY-asm"
