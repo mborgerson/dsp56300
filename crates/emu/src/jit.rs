@@ -51,13 +51,25 @@ struct CompiledBlock {
 /// block, the entry is evicted and recompiled with the tighter boundary.
 struct CodeCache {
     blocks: Vec<Option<CompiledBlock>>,
+    /// Widest extent (end_pc - start_pc) ever inserted. A block overlapping
+    /// [lo, hi] can start no earlier than lo - (max_span - 1), so range
+    /// invalidation scans that window instead of all of PRAM; a program
+    /// that pages overlays invalidates tens of thousands of times a second
+    /// from the run loop.
+    max_span: u32,
 }
 
 impl CodeCache {
     fn new(pram_size: usize) -> Self {
         Self {
             blocks: vec![None; pram_size],
+            max_span: 0,
         }
+    }
+
+    fn insert(&mut self, pc: u32, block: CompiledBlock) {
+        self.max_span = self.max_span.max(block.end_pc.saturating_sub(pc));
+        self.blocks[pc as usize] = Some(block);
     }
 
     /// Invalidate all cached blocks (e.g. when P-memory changes).
@@ -67,12 +79,14 @@ impl CodeCache {
 
     /// Invalidate only blocks whose code range [start_pc, end_pc) overlaps [lo, hi].
     fn invalidate_range(&mut self, lo: u32, hi: u32) {
-        let lo = lo as usize;
-        let hi = (hi as usize).min(self.blocks.len().saturating_sub(1));
-        for pc in 0..self.blocks.len() {
+        if self.blocks.is_empty() {
+            return;
+        }
+        let first = (lo as usize).saturating_sub(self.max_span.saturating_sub(1) as usize);
+        let hi = (hi as usize).min(self.blocks.len() - 1);
+        for pc in first..=hi {
             if let Some(block) = &self.blocks[pc]
-                && pc <= hi
-                && (block.end_pc as usize) > lo
+                && (block.end_pc as usize) > lo as usize
             {
                 self.blocks[pc] = None;
             }
@@ -1067,7 +1081,7 @@ impl DspState {
                         .invalidate_range(pc, block.end_pc.saturating_sub(1));
                     self.pram_dirty.clear_dirty_range(pc, block.end_pc);
                 }
-                jit.cache.blocks[pc as usize] = Some(block);
+                jit.cache.insert(pc, block);
                 if let Some(ref mut profile) = jit.block_profile {
                     compile_ticks_here = read_ticks().wrapping_sub(tc0);
                     profile.dispatch.compile_count += 1;
@@ -1234,6 +1248,33 @@ mod tests {
         jit.invalidate_range(0, 1);
         assert!(!jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x00));
         assert!(jit.instr_cache.keys().any(|&(pc, _, _)| pc == 0x10));
+    }
+
+    #[test]
+    fn test_invalidate_range_hits_block_starting_before_lo() {
+        // The range scan starts max_span-1 entries before lo; a wide block
+        // whose extent reaches into [lo, hi] must still be evicted even
+        // though its start PC is below the invalidated range.
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+        // Straight-line block $00..$08 ending in a self-loop at $08.
+        for w in pram.iter_mut().take(8) {
+            *w = 0x000008; // INC A
+        }
+        pram[8] = 0x0C0008; // JMP $8
+
+        s.run(&mut jit, 12);
+        let end = jit.cache.blocks[0].unwrap().end_pc;
+        assert!(end > 4, "expected a multi-word block, got end_pc {end}");
+        assert!(jit.cache.max_span >= end);
+
+        // Invalidate a range the block only reaches into.
+        jit.cache.invalidate_range(4, 4);
+        assert!(jit.cache.blocks[0].is_none());
     }
 
     #[test]
