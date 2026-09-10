@@ -184,7 +184,17 @@ impl<'a> Emitter<'a> {
         let mut count = 0u32;
         const MAX_INLINE_LEN: u32 = 64;
 
+        // Open forward-skip merge targets, innermost last (see
+        // `forward_skip_target`). The emitter closes a skip when the walk
+        // reaches its target, so targets must land on top-level
+        // instruction boundaries: anything else leaves the stack non-empty
+        // at la+1 and rejects the body.
+        let mut open_skips: Vec<u32> = Vec::new();
+
         while body_pc <= la {
+            while open_skips.last() == Some(&body_pc) {
+                open_skips.pop();
+            }
             if body_pc >= p_end {
                 return false;
             }
@@ -192,7 +202,33 @@ impl<'a> Emitter<'a> {
             let inst = decode::decode(opcode);
             let inst_len = decode::instruction_length(&inst);
 
+            let nw = map.read_pram(mask_pc(body_pc + 1));
+            if let Some(target) = Self::forward_skip_target(&inst, body_pc, nw) {
+                // Forward only, staying strictly inside the body (a
+                // branch to LA+1 would leave the loop frame active
+                // without running the loop-end machinery), and
+                // well-nested inside any enclosing open skip.
+                if target < body_pc + inst_len || target > la {
+                    return false;
+                }
+                if let Some(&enclosing) = open_skips.last()
+                    && target > enclosing
+                {
+                    return false;
+                }
+                open_skips.push(target);
+                body_pc += inst_len;
+                count += 1;
+                continue;
+            }
+
             if Self::is_do_instruction(&inst) {
+                // A DO/REP under conditional control needs loop-scope and
+                // flush mechanics inside a conditional arm the emitter
+                // does not support - keep skip regions loop-free.
+                if !open_skips.is_empty() {
+                    return false;
+                }
                 // DO FOREVER cannot be inlined (infinite native loop)
                 if matches!(inst, Instruction::DoForever | Instruction::DorForever) {
                     return false;
@@ -233,6 +269,9 @@ impl<'a> Emitter<'a> {
             }
 
             if Self::is_rep_instruction(&inst) {
+                if !open_skips.is_empty() {
+                    return false;
+                }
                 // REP consumes itself (1 word) + the repeated instruction.
                 let rep_next = body_pc + 1;
                 if rep_next >= p_end {
@@ -262,6 +301,11 @@ impl<'a> Emitter<'a> {
 
         // Instructions must tile [body_start, la+1) exactly.
         if body_pc != la + 1 {
+            return false;
+        }
+        // Every skip target must have landed on a top-level instruction
+        // boundary at or before LA.
+        if !open_skips.is_empty() {
             return false;
         }
         // Practical size limit.
@@ -518,10 +562,49 @@ impl<'a> Emitter<'a> {
         self.eunz_current = false;
         let body_start = do_pc + 2;
         let mut body_pc = body_start;
+        // Open forward skips: (merge target, merge block, conditional
+        // state), innermost last. `is_do_body_inlineable` validated the
+        // nesting, so every target lands on a top-level boundary at or
+        // before LA and skip regions contain no DO/REP.
+        let mut open_skips: Vec<(u32, Block, ConditionalState)> = Vec::new();
         while body_pc <= la {
+            while open_skips.last().is_some_and(|(t, _, _)| *t == body_pc) {
+                let (_, merge_blk, mut cond_state) = open_skips.pop().unwrap();
+                // Path-accurate cycles: the fall-through arm's cycle
+                // charge lands inside the arm, matching step mode where
+                // skipped instructions never execute.
+                self.flush_pending_cycles();
+                self.end_conditional_arm(&mut cond_state);
+                self.builder.ins().jump(merge_blk, &[]);
+                self.builder.switch_to_block(merge_blk);
+                self.builder.seal_block(merge_blk);
+                self.merge_conditional(&cond_state);
+            }
             let opcode = self.map.read_pram(body_pc);
             let nw = self.map.read_pram(mask_pc(body_pc + 1));
             let inst = decode::decode(opcode);
+
+            if let Some(target) = Self::forward_skip_target(&inst, body_pc, nw) {
+                let inst_len = decode::instruction_length(&inst);
+                debug_assert!(target >= body_pc + inst_len && target <= la);
+                // The predicate runs unconditionally (operand read
+                // side effects included), exactly as the branch
+                // instruction would evaluate it.
+                self.cur_inst_pc = body_pc;
+                self.cur_decode_len = inst_len;
+                let taken = self.emit_skip_predicate(&inst);
+                let merge_blk = self.builder.create_block();
+                let fall_blk = self.builder.create_block();
+                let cond_state = self.begin_conditional_skip();
+                self.builder
+                    .ins()
+                    .brif(taken, merge_blk, &[], fall_blk, &[]);
+                self.builder.switch_to_block(fall_blk);
+                self.builder.seal_block(fall_blk);
+                open_skips.push((target, merge_blk, cond_state));
+                body_pc += inst_len;
+                continue;
+            }
 
             if Self::is_do_instruction(&inst) {
                 let inner_la = Self::compute_do_la(&inst, body_pc, nw);
@@ -539,6 +622,8 @@ impl<'a> Emitter<'a> {
                 body_pc += decode::instruction_length(&inst);
             }
         }
+
+        debug_assert!(open_skips.is_empty());
 
         // 4. Decrement LC, check loop continuation.
         self.flush_pending_cycles(); // flush body cycles once per iteration

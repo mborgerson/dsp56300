@@ -2947,3 +2947,152 @@ fn test_do_body_undominated_sr_escape_stays_gated() {
         "movec sr,x1;mac",
     );
 }
+
+// Forward-skip if-conversion inside inline DO bodies: mixing loops guard
+// a few body instructions with `brclr #b,rn,<fwd>`, which would otherwise
+// reject the body from inlining entirely. Each shape runs the block path
+// (inline loop with structured skip) against execute_one as the oracle.
+
+#[test]
+fn test_do_body_forward_skip_always_taken() {
+    // x1 stays 0, so brclr #1,x1 (branch if clear) skips the add every
+    // iteration; the skip target is LA itself (merge at the last body
+    // instruction).
+    assert_do_body_paths_agree(
+        &[
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC581, 0x000003, // brclr #1,x1,+3 -> skips add
+            0x200040, // add x0,a       (skipped)
+            0x200044, // sub x0,a       (merge target = LA)
+        ],
+        "mpy;brclr(taken);add;sub",
+    );
+}
+
+#[test]
+fn test_do_body_forward_skip_never_taken() {
+    // bset #1,x1 first, so the brclr falls through and the add runs
+    // every iteration.
+    assert_do_body_paths_agree(
+        &[
+            0x0AC561, // bset #1,x1
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC581, 0x000003, // brclr #1,x1,+3
+            0x200040, // add x0,a       (always runs)
+            0x200044, // sub x0,a
+        ],
+        "bset;mpy;brclr(never);add;sub",
+    );
+}
+
+#[test]
+fn test_do_body_forward_skip_alternating() {
+    // bchg #1,x1 toggles the predicate every iteration, so the arm runs
+    // on iterations 1 and 3 and is skipped on 2 and 4 (or vice versa) -
+    // both runtime paths of one compiled skip.
+    assert_do_body_paths_agree(
+        &[
+            0x0BC541, // bchg #1,x1
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC581, 0x000003, // brclr #1,x1,+3
+            0x200040, // add x0,a       (every other iteration)
+            0x200044, // sub x0,a
+        ],
+        "bchg;mpy;brclr(alt);add;sub",
+    );
+}
+
+#[test]
+fn test_do_body_forward_skips_nested() {
+    // An outer register-bit skip whose region contains a second,
+    // well-nested skip; the outer predicate alternates via bchg, the
+    // inner brset #0,y0 is always taken (Y0 seeds to 3).
+    assert_do_body_paths_agree(
+        &[
+            0x0BC541, // bchg #1,x1
+            0x0CC581, 0x000007, // brclr #1,x1,+7 -> outer skip to LA
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC6A0, 0x000003, // brset #0,y0,+3 -> inner skip
+            0x200040, // add x0,a       (inner arm, skipped)
+            0x200044, // sub x0,a       (inner merge)
+            0x218D00, // move a1,b1     (outer merge = LA)
+        ],
+        "nested skips",
+    );
+}
+
+#[test]
+fn test_do_body_bcc_forward_skip() {
+    // A condition-code forward branch as the skip: cmp materializes the
+    // flags, blt reads them (a dominated SR read), and the skipped sub
+    // runs only on the not-taken iterations.
+    assert_do_body_paths_agree(
+        &[
+            0x200045, // cmp x0,a
+            0x0D1049, 0x000003, // blt +3 -> skips sub
+            0x200044, // sub x0,a
+            0x200040, // add x0,a
+        ],
+        "cmp;blt;sub;add",
+    );
+}
+
+#[test]
+fn test_do_body_forward_skip_arm_reads_memory() {
+    // The skipped region contains a dynamic X read - the arm's memory
+    // machinery (flush/invalidate on callback-bearing maps) must merge
+    // correctly with the skip path.
+    assert_do_body_paths_agree(
+        &[
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC581, 0x000004, // brclr #1,x1,+4
+            0x44E000, // move x:(r0),x0 (arm)
+            0x200040, // add x0,a       (arm)
+            0x200044, // sub x0,a       (merge)
+        ],
+        "skip arm with memory read",
+    );
+}
+
+#[test]
+fn test_mixing_nest_inlines_with_skips() {
+    // A real mixer's nest: dor x0 wrapping dor #$20 whose body holds a
+    // brclr forward skip to LA. The whole nest is one block entry per
+    // outer execution, not one per inner iteration.
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let words = [
+        0x06C410, 0x000010, // 0000: dor x0,$0011 (outer, LA=$0010)
+        0x0A75D0, 0x000005, // 0002: move x:>(r5+5),r0
+        0x64D900, // 0004: move x:(r1)+,r4
+        0x46DA00, // 0005: move x:(r2)+,y0
+        0x062090, 0x000009, // 0006: dor #$20,$0010 (inner, LA=$000F)
+        0x44D800, // 0008: move x:(r0)+,x0
+        0x2000D0, // 0009: mpy +y0,x0,a
+        0x021595, // 000a: move x:(r5+4),x1
+        0x0CC581, 0x000004, // 000b: brclr #1,x1,$000F
+        0x44E400, // 000d: move x:(r4),x0
+        0x200040, // 000e: add x0,a
+        0x565C00, // 000f: move a,x:(r4)+  (inner LA)
+        0x000000, // 0010: nop             (outer LA)
+        0x000086, // 0011: wait (park)
+    ];
+    for (i, w) in words.iter().enumerate() {
+        pram[i] = *w;
+    }
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::X0] = 2; // outer count
+    let mut guard = 0;
+    while s.pc < 0x11 && s.power_state == PowerState::Normal {
+        s.run(&mut jit, 10_000);
+        guard += 1;
+        assert!(guard < 10_000, "did not reach the park");
+    }
+    let entries = jit.stats.block_entries;
+    assert!(
+        entries <= 8,
+        "nest did not inline: {entries} block entries for 2x32 iterations"
+    );
+}

@@ -243,6 +243,23 @@ impl<'a> Emitter<'a> {
         self.conditional_snapshot()
     }
 
+    /// `begin_conditional` for an inline forward skip (`emit_do_inline`):
+    /// materializes pending flags and cycles, then flushes the promotion
+    /// cache so memory is current on both the skip and fall-through
+    /// paths. The fall-through arm may contain arbitrary body
+    /// instructions whose helper calls flush and invalidate the cache;
+    /// with memory current at the branch, the merge can soundly reload
+    /// whatever the arm invalidated (`record_invalidations`).
+    pub(super) fn begin_conditional_skip(&mut self) -> ConditionalState {
+        self.flush_pending_flags();
+        self.flush_pending_cycles();
+        self.flush_promoted();
+        self.cond_depth += 1;
+        let mut state = self.conditional_snapshot();
+        state.record_invalidations = true;
+        state
+    }
+
     /// `begin_conditional` that carries a pending flag computation across
     /// the conditional instead of materializing it. Sound only when neither
     /// arm can read or write SR or defer flags of its own - the pending SSA
@@ -271,6 +288,7 @@ impl<'a> Emitter<'a> {
 
     fn conditional_snapshot(&mut self) -> ConditionalState {
         ConditionalState {
+            record_invalidations: false,
             saved_dirty: self.promoted.dirty,
             saved_acc_dirty: self.promoted.acc_dirty,
             saved_valid: self.promoted.valid,
@@ -301,8 +319,20 @@ impl<'a> Emitter<'a> {
                 self.flush_reg(idx);
                 state.modified[idx] = true;
             }
+            // A helper call inside the arm can invalidate a register that
+            // was valid at the branch (and may have rewritten its memory,
+            // e.g. an SR L/S OR-write). The other path still holds the
+            // pre-branch variable, so the merge must reload from memory -
+            // current on every path because the skip opener flushed.
+            if state.record_invalidations && state.saved_valid[idx] && !self.promoted.valid[idx] {
+                state.modified[idx] = true;
+            }
         }
         for i in 0..2 {
+            if state.record_invalidations && state.saved_acc_valid[i] && !self.promoted.acc_valid[i]
+            {
+                state.modified_acc[i] = true;
+            }
             if self.promoted.acc_dirty[i] && !state.saved_acc_dirty[i] {
                 let acc = if i == 0 {
                     Accumulator::A

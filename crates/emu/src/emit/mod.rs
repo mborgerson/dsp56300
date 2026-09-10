@@ -149,6 +149,12 @@ struct DeferredScope {
 /// pre-branch state. After the merge, `merge_conditional()` invalidates
 /// only the registers that were actually modified in any arm.
 struct ConditionalState {
+    /// Treat a register the arm's helper calls invalidated as modified,
+    /// so the merge reloads it from memory. Sound only when the opener
+    /// flushed the promotion cache pre-branch (memory current on every
+    /// path) - `begin_conditional_skip` does; the block-terminator
+    /// conditionals don't and keep the pre-branch variables instead.
+    record_invalidations: bool,
     saved_dirty: [bool; 64],
     saved_acc_dirty: [bool; 2],
     saved_valid: [bool; 64],
@@ -1423,6 +1429,51 @@ impl<'a> Emitter<'a> {
                 ssh_or_sp(*numreg)
             }
             _ => false,
+        }
+    }
+
+    /// A conditional branch whose taken edge skips forward over a few
+    /// body-internal instructions - the `[op, brclr #b,rn,<fwd>, ops,
+    /// <target>]` shape a mixing loop uses for per-voice mode flags.
+    /// Inside an inline DO body such a branch compiles to a structured
+    /// conditional skip instead of ending the block, which is what lets
+    /// those loops inline at all. Returns the compile-time target; the
+    /// caller enforces the forward, in-body and nesting rules. Subroutine
+    /// forms stay excluded (they push guest stack), as do SSH-operand tests
+    /// (the predicate pops the stack and can fault).
+    pub(super) fn forward_skip_target(inst: &Instruction, pc: u32, next_word: u32) -> Option<u32> {
+        let reg_ok = |r: &u8| *r as usize != reg::SSH;
+        let rel = mask_pc(pc.wrapping_add(next_word));
+        match inst {
+            Instruction::BrclrEa { .. }
+            | Instruction::BrclrAa { .. }
+            | Instruction::BrclrPp { .. }
+            | Instruction::BrclrQq { .. }
+            | Instruction::BrsetEa { .. }
+            | Instruction::BrsetAa { .. }
+            | Instruction::BrsetPp { .. }
+            | Instruction::BrsetQq { .. } => Some(rel),
+            Instruction::BrclrReg { reg_idx, .. } | Instruction::BrsetReg { reg_idx, .. }
+                if reg_ok(reg_idx) =>
+            {
+                Some(rel)
+            }
+            Instruction::JclrEa { .. }
+            | Instruction::JclrAa { .. }
+            | Instruction::JclrPp { .. }
+            | Instruction::JclrQq { .. }
+            | Instruction::JsetEa { .. }
+            | Instruction::JsetAa { .. }
+            | Instruction::JsetPp { .. }
+            | Instruction::JsetQq { .. } => Some(next_word),
+            Instruction::JclrReg { reg_idx, .. } | Instruction::JsetReg { reg_idx, .. }
+                if reg_ok(reg_idx) =>
+            {
+                Some(next_word)
+            }
+            Instruction::Bcc { addr, .. } => Some(mask_pc((pc as i32 + addr) as u32)),
+            Instruction::BccLong { .. } => Some(rel),
+            _ => None,
         }
     }
 
