@@ -740,7 +740,6 @@ impl<'a> Emitter<'a> {
         self.set_inst_len(1);
         self.set_cycles(3);
         let srcreg = (ea_mode & 0x7) as usize;
-        let dstreg = (dst_reg & 0x7) as usize;
 
         // Save Rn, calc EA (which updates Rn), capture new Rn, restore old
         let saved_rn = self.load_reg(reg::R0 + srcreg);
@@ -748,11 +747,9 @@ impl<'a> Emitter<'a> {
         let new_rn = self.load_reg(reg::R0 + srcreg);
         self.store_reg(reg::R0 + srcreg, saved_rn);
 
-        if dst_reg & 8 != 0 {
-            self.store_reg(reg::N0 + dstreg, new_rn);
-        } else {
-            self.store_reg(reg::R0 + dstreg, new_rn);
-        }
+        // ddddd is the register index ($04-$1F: x0..b, r0-r7, n0-n7); moves
+        // to a/b use the standard write-through convention.
+        self.write_reg_for_move(dst_reg as usize, new_rn);
     }
 
     pub(super) fn emit_lua_rel(&mut self, aa: u8, addr_reg: u8, dst_reg: u8, dest_is_n: bool) {

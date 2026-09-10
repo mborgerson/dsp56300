@@ -590,7 +590,7 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("00001100000111100001sssD", "lsl S, D", shift reg, LslReg),
         op!("000011000001111011iiiiiD", "lsr #ii, D", shift imm, LsrImm),
         op!("00001100000111100011sssD", "lsr S, D", shift reg, LsrReg),
-        op!("00000100010MMRRR000ddddd", "lua ea, D", |T, opc| Lua { ea_mode: tmpl_ea(T, opc), dst_reg: tmpl_reg(T, b'd', opc) & 0xF }),
+        op!("00000100010MMRRR000ddddd", "lua ea, D", |T, opc| Lua { ea_mode: tmpl_ea(T, opc), dst_reg: tmpl_reg(T, b'd', opc) }),
         op!("0000010000aaaRRRaaaadddd", "lua (Rn + aa), D", |T, opc| LuaRel { aa: tmpl_field(T, b'a', opc) as u8, addr_reg: tmpl_field(T, b'R', opc) as u8, dst_reg: (opc & 0x7) as u8, dest_is_n: (opc >> 3) & 1 != 0 }),
         op!("00000001000sssss11QQdk10", "mac S, #n, D", mulshift, MulShiftOp::Mac),
         op!("000000010100000111qqdk10", "maci #xxxx, S, D", |T, opc| MacI { k: tmpl_field(T, b'k', opc) != 0, d: tmpl_acc(T, b'd', opc), src: qq_reg(tmpl_field(T, b'q', opc) as u8) }),
@@ -820,9 +820,11 @@ fn has_invalid_register(inst: &Instruction) -> bool {
         Instruction::AndI { dest, .. } | Instruction::OrI { dest, .. } => *dest > 3,
         // tcc: REGISTERS_TCC entries 2-7 have NULL register pairs.
         Instruction::Tcc { acc, .. } => matches!(acc, Some((0, _) | (_, 0))),
-        // lua: dst_reg uses a 4-bit R/N encoding, bit 4 is don't-care (normalized in decoder).
-        // lra: dst_reg indexes REGISTER_NAMES; invalid indices produce empty names.
-        Instruction::LraRn { dst_reg, .. } | Instruction::LraDisp { dst_reg, .. } => bad(*dst_reg),
+        // lua/lra: 5-bit ddddd indexes REGISTER_NAMES ($04-$1F valid);
+        // codes 0-3 have empty names.
+        Instruction::Lua { dst_reg, .. }
+        | Instruction::LraRn { dst_reg, .. }
+        | Instruction::LraDisp { dst_reg, .. } => bad(*dst_reg),
         // bchg/bclr/bset/btst reg: DDDDDD indexes REGISTER_NAMES.
         Instruction::BchgReg { reg_idx, .. }
         | Instruction::BclrReg { reg_idx, .. }

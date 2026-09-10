@@ -2066,8 +2066,8 @@ fn test_lua_ea() {
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-    // lua (r0)+,n0
-    pram[0] = 0x045808;
+    // lua (r0)+,n0 (ddddd=$18)
+    pram[0] = 0x045818;
     s.registers[reg::R0] = 0x000010;
     s.registers[reg::N0] = 0x000001;
     run_one(&mut s, &mut jit);
@@ -2089,8 +2089,8 @@ fn test_lua_ea_n_dest() {
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
     // MM=01 -> bits 12:11 = 01. EA field for calc_ea = 01_000 = 8
     // Format: 00000100010MMRRR000ddddd
-    // MM=01, RRR=000, ddddd=01010(N2)
-    pram[0] = 0x04480A; // LUA (R0)+,N2
+    // MM=01, RRR=000, ddddd=11010(N2)
+    pram[0] = 0x04481A; // LUA (R0)+,N2
     s.registers[reg::R0] = 0x100;
     s.registers[reg::N0] = 1;
     run_one(&mut s, &mut jit);
@@ -2123,20 +2123,57 @@ fn test_lua_rel_n_dest_neg() {
 #[test]
 fn test_lua_ea_r_dest() {
     // lua (R0)+,R2 -- bit 3 = 0 stores to R register instead of N register
-    // Existing test_lua_ea uses N dest (bit 3=1). Change ddddd from 01000 to 00010.
-    // Base opcode 0x045808 -> 0x045802 (ddddd=00010, bit3=0, dstreg=2 -> R2)
+    // ddddd=10010 (r2).
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-    pram[0] = 0x045802;
+    pram[0] = 0x045812;
     s.registers[reg::R0] = 0x000010;
     s.registers[reg::N0] = 0x000001;
     run_one(&mut s, &mut jit);
     // (R0)+ computes R0+1=0x11, stores in R2; R0 unchanged
     assert_eq!(s.registers[reg::R2], 0x000011);
     assert_eq!(s.registers[reg::R0], 0x000010);
+}
+
+#[test]
+fn test_lua_ea_data_reg_dest() {
+    // lua (r0)+,x0 (ddddd=$04): data ALU registers are valid LUA
+    // destinations (manual 13-97), and $04 is x0, not r4.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x045804;
+    s.registers[reg::R0] = 0x000010;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::X0], 0x000011);
+    assert_eq!(s.registers[reg::R0], 0x000010);
+    assert_eq!(s.registers[reg::R4], 0); // old decode wrote r4
+}
+
+#[test]
+fn test_lua_ea_accumulator_dest() {
+    // lua (r0)+,a (ddddd=$0E): accumulator destination uses the standard
+    // move write-through (a1=value, a2=sign extension, a0=0), and $0E is
+    // a, not n6.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x04580E;
+    s.registers[reg::R0] = 0x876542;
+    s.registers[reg::A0] = 0x111111;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::A1], 0x876543);
+    assert_eq!(s.registers[reg::A2], 0xFF); // sign-extended from bit 23
+    assert_eq!(s.registers[reg::A0], 0);
+    assert_eq!(s.registers[reg::R0], 0x876542);
+    assert_eq!(s.registers[reg::N6], 0); // old decode wrote n6
 }
 
 #[test]

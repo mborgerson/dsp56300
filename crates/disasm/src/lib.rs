@@ -1638,9 +1638,7 @@ pub fn disassemble_with_symbols(
             if extra {
                 len = 2;
             }
-            let rn = dst_reg & 7;
-            let prefix = if dst_reg & 8 != 0 { 'n' } else { 'r' };
-            write!(out, "lua {},{}{}", addr, prefix, rn).unwrap();
+            write!(out, "lua {},{}", addr, reg_name(dst_reg as usize)).unwrap();
         }
         Instruction::LuaRel {
             aa,
