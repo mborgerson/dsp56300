@@ -2126,13 +2126,15 @@ fn test_jsr_stack_overflow() {
         "SE bit should be set after stack overflow"
     );
     // STACK_ERROR interrupt should have been dispatched by process_pending_interrupts
-    // (called at end of execute_one). The pending bit is cleared and the interrupt
-    // pipeline enters the Fast state.
+    // (called at end of execute_one). JSR overflow arms the silicon
+    // shadow model (push-class stream budget 9 - len; the branch
+    // completed, so the shadow rides at the target).
     assert_eq!(
         s.interrupts.state,
-        InterruptState::Fast,
-        "Interrupt pipeline should be in Fast state after STACK_ERROR dispatch"
+        InterruptState::Armed,
+        "Interrupt pipeline should be Armed after JSR overflow"
     );
+    assert_eq!(s.interrupts.fault_budget, 8); // 9 - len(1, short form)
     // The vector address should point to STACK_ERROR's IVT slot (VBA + $02)
     assert_eq!(
         s.interrupts.vector_addr, 0x02,

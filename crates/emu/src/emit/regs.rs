@@ -431,6 +431,7 @@ impl<'a> Emitter<'a> {
             self.read_accu24(idx)
         } else if idx == reg::SSH {
             // Reading SSH pops the stack.
+            self.emit_spill_fault_budget(FaultClass::Pop);
             self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
         } else if idx == reg::A2 || idx == reg::B2 {
             // Reading A2/B2 through a move sign-extends the 8-bit extension
@@ -479,10 +480,12 @@ impl<'a> Emitter<'a> {
             let packed = self.val24_to_acc56(val);
             self.store_acc(acc, packed);
         } else if idx == reg::SSH {
+            self.emit_spill_fault_budget(FaultClass::Push);
             self.emit_call_extern_val(jit_write_ssh as *const () as usize, val);
         } else if idx == reg::SSL {
             self.emit_call_extern_val(jit_write_ssl as *const () as usize, val);
         } else if idx == reg::SP {
+            self.emit_spill_fault_budget(FaultClass::SpWrite);
             self.emit_call_extern_val(jit_write_sp as *const () as usize, val);
         } else {
             self.store_reg(idx, val);

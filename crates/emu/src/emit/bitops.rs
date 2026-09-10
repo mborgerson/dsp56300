@@ -98,6 +98,7 @@ impl<'a> Emitter<'a> {
         let is_sp = reg_idx as usize == reg::SP;
         let is_full_acc = reg_idx as usize == reg::A || reg_idx as usize == reg::B;
         let val = if is_ssh && op == BitOp::Test {
+            self.emit_spill_fault_budget(FaultClass::Pop);
             self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
         } else if is_full_acc {
             self.read_reg_for_move(reg_idx as usize)
@@ -108,10 +109,12 @@ impl<'a> Emitter<'a> {
         };
         if let Some(result) = self.apply_bit_op(val, bit_num as u32, op) {
             if is_ssh {
+                self.emit_spill_fault_budget(FaultClass::Pop);
                 self.emit_call_extern_val(jit_write_ssh_tos as *const () as usize, result);
             } else if is_ssl {
                 self.emit_call_extern_val(jit_write_ssl as *const () as usize, result);
             } else if is_sp {
+                self.emit_spill_fault_budget(FaultClass::SpWrite);
                 self.emit_call_extern_val(jit_write_sp as *const () as usize, result);
             } else if is_full_acc {
                 self.write_reg_for_move(reg_idx as usize, result);
