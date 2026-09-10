@@ -307,6 +307,24 @@ impl<'a> Emitter<'a> {
         self.mask56(packed)
     }
 
+    /// SM saturation for ROUNDING instructions (RND/MPYR/MACR families).
+    /// Silicon clamps these to the rounded grid: the low 24 bits of the
+    /// saturation constant are zero ($7FFFFF:000000 positive rail), unlike
+    /// the plain-op clamp ($7FFFFF:FFFFFF). Verified on MCPX hardware via
+    /// SM-mode RND and MACR probes (see ARCHITECTURE-NOTES.md).
+    pub(super) fn emit_saturate_sm_rnd(&mut self, result: Value) -> Value {
+        let sat = self.emit_saturate_sm(result);
+        let needs_sat = self.builder.use_var(self.sm_needs_sat_var);
+        // The marker variable is I32; an I64 zero here is a type error the
+        // Cranelift verifier rejects in debug builds.
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let did_sat = self.builder.ins().icmp(IntCC::NotEqual, needs_sat, zero);
+        let low_mask = self.builder.ins().iconst(types::I64, !0xFFFFFFi64);
+        let low_mask = self.mask56(low_mask);
+        let zeroed = self.builder.ins().band(sat, low_mask);
+        self.builder.ins().select(did_sat, zeroed, sat)
+    }
+
     /// Apply deferred V/L flags from a previous `emit_saturate_sm` call.
     /// Call AFTER the instruction's normal flag computation (update_nz, update_vcl, etc.).
     pub(super) fn emit_sm_vl_deferred(&mut self) {
