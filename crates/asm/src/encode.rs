@@ -2128,6 +2128,19 @@ fn encode_parallel_xy_double(
     let (x_ea_bits, x_ext) = encode_ea(x_ea, sym, pc)?;
     let (y_ea_bits, y_ext) = encode_ea(y_ea, sym, pc)?;
 
+    // The pm8 EA fields are 2-bit MM codes: only (Rn)+Nn, (Rn)-, (Rn)+
+    // and (Rn) exist (MMM 001..100). Reject everything else instead of
+    // silently truncating the mode bits - e.g. `(Rn)-Nn` (MMM=000) would
+    // otherwise alias onto plain `(Rn)` and change semantics.
+    for ea_bits in [x_ea_bits, y_ea_bits] {
+        let mmm = (ea_bits as u32 >> 3) & 0x7;
+        if !(1..=4).contains(&mmm) {
+            return Err(enc_err(
+                "dual X:Y move supports only (Rn)+Nn, (Rn)-, (Rn)+, (Rn) addressing",
+            ));
+        }
+    }
+
     let w_bit = if x_write { 1u32 << 15 } else { 0 };
     let dir_bit = if y_write { 1u32 << 22 } else { 0 };
 

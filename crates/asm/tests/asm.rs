@@ -3327,19 +3327,23 @@ fn test_norm_r7() {
     roundtrip("norm r7,b", 0);
 }
 
-// 1h: AbsAddr in dual moves
+// 1h: AbsAddr in dual moves is rejected: the pm8 EA fields are 2-bit MM
+// codes with no absolute (or -Nn / -(Rn)) encodings; silently truncating
+// the mode bits changed semantics (asm56300 also rejects these).
 #[test]
-fn test_dual_move_abs_x_read() {
-    // x:$addr,reg second_move -- dual move with absolute X address (read side)
-    let result = assemble_line("clr a x:$0010,x0 a,y:(r4)", 0).unwrap();
-    assert_ne!(result.word0, 0);
+fn test_dual_move_abs_x_read_rejected() {
+    assert!(assemble_line("clr a x:$0010,x0 a,y:(r4)", 0).is_err());
 }
 
 #[test]
-fn test_dual_move_abs_x_write() {
-    // reg,x:$addr second_move -- dual move with absolute X address (write side)
-    let result = assemble_line("clr a a,x:$0010 y:(r4)+,y0", 0).unwrap();
-    assert_ne!(result.word0, 0);
+fn test_dual_move_abs_x_write_rejected() {
+    assert!(assemble_line("clr a a,x:$0010 y:(r4)+,y0", 0).is_err());
+}
+
+#[test]
+fn test_dual_move_minus_n_rejected() {
+    assert!(assemble_line("move a,x:(r0)- b,y:(r4)-n4", 0).is_err());
+    assert!(assemble_line("move x:(r0)-n0,x0 y:(r4)+,y0", 0).is_err());
 }
 
 // 1i: XYMem with immediate EA (force-long immediate in parallel move)
