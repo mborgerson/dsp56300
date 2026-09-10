@@ -272,6 +272,23 @@ enum PendingFlags {
     Logical { result24: Value },
 }
 
+impl PendingFlags {
+    /// Does materializing this kind consume the deferred SM saturation
+    /// marker (`emit_sm_vl_deferred`)? Only these kinds need the marker
+    /// carried alongside them.
+    fn consumes_sm_marker(&self) -> bool {
+        matches!(
+            self,
+            PendingFlags::AluAddSub { .. }
+                | PendingFlags::NzClearVSm { .. }
+                | PendingFlags::MacVlSm { .. }
+                | PendingFlags::NzVlSm { .. }
+                | PendingFlags::NzSm { .. }
+                | PendingFlags::AddlSubl { .. }
+        )
+    }
+}
+
 /// Cranelift IR emitter for DSP56300 instructions.
 pub struct Emitter<'a> {
     builder: FunctionBuilder<'a>,
@@ -297,6 +314,11 @@ pub struct Emitter<'a> {
     sm_needs_sat_var: Variable,
     /// Deferred flag computation. Set by ALU ops, flushed when SR is read.
     pending_flags: Option<PendingFlags>,
+    /// `sm_needs_sat_var` as it stood when `pending_flags` was recorded.
+    /// Snapshotting it there frees `emit_saturate_sm` from having to
+    /// materialize the previous instruction's computation before it may
+    /// redefine the variable — see `set_pending`.
+    pending_sm_marker: Option<Value>,
 }
 
 impl<'a> Emitter<'a> {
@@ -379,6 +401,7 @@ impl<'a> Emitter<'a> {
             instructions_block,
             sm_needs_sat_var,
             pending_flags: None,
+            pending_sm_marker: None,
         }
     }
 
