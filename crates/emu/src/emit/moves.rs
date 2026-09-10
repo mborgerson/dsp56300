@@ -168,6 +168,12 @@ impl<'a> Emitter<'a> {
         self.set_cycles(1);
         let src_reg = src_reg as usize;
         let dst_reg = dst_reg as usize;
+        // A movec SSH pop delivers at start+8 whatever the destination:
+        // the register-destination form measured the same +8 as the
+        // memory forms (silicon, p23 probe_pop_base: movec
+        // ssh,r0 executes 7 shadow words, the 8th is the saved PC). The
+        // bit-op SSH reads stay at +7 (b21 goldens pin their frames).
+        self.fault_anchor_bump = 1;
         if w {
             // Write: D1 <- S1
             let val = self.read_reg_for_move(src_reg);
@@ -177,6 +183,7 @@ impl<'a> Emitter<'a> {
             let val = self.read_reg_for_move(dst_reg);
             self.write_reg_for_move(src_reg, val);
         }
+        self.fault_anchor_bump = 0;
     }
 
     pub(super) fn emit_movec_ea(
