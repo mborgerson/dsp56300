@@ -169,6 +169,20 @@ typedef struct {
 } Dsp56300CreateInfo;
 
 /**
+ * Translation counters: blocks compiled, nanoseconds spent compiling,
+ * cached blocks dropped because the words under them changed, and
+ * translations reused from the content cache. A program that rewrites its
+ * own P memory can spend more time rebuilding code than running it, and no
+ * execution profile shows that.
+ */
+typedef struct {
+  uint64_t compiles;
+  uint64_t compile_ns;
+  uint64_t invalidations;
+  uint64_t cache_hits;
+} Dsp56300JitStats;
+
+/**
  * Interrupt pipeline state for save/restore.
  */
 typedef struct {
@@ -300,6 +314,14 @@ void dsp56300_set_cycle_count(Dsp56300Jit *dsp, uint32_t count);
  * `dsp` must be a valid pointer to a `DspJit`.
  */
 void dsp56300_invalidate_cache(Dsp56300Jit *dsp);
+
+/**
+ * Read the translation counters.
+ *
+ * # Safety
+ * `dsp` must be a valid pointer to a `DspJit`; `out` must be writable.
+ */
+void dsp56300_get_jit_stats(const Dsp56300Jit *dsp, Dsp56300JitStats *out);
 
 /**
  * Read a word from DSP memory.

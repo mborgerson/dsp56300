@@ -54,7 +54,7 @@ pub enum CReg {
 use dsp56300_emu::core::{
     DspState, InterruptState, MemSpace, MemoryMap, MemoryRegion, PowerState, RegionKind,
 };
-use dsp56300_emu::jit::JitEngine;
+use dsp56300_emu::jit::{JitEngine, JitStats};
 use std::ffi::c_void;
 
 /// Region kind tag for C FFI.
@@ -336,6 +336,43 @@ pub unsafe extern "C" fn dsp56300_set_cycle_count(dsp: *mut DspJit, count: u32) 
 pub unsafe extern "C" fn dsp56300_invalidate_cache(dsp: *mut DspJit) {
     let dsp = unsafe { &mut *dsp };
     dsp.jit.invalidate_cache();
+}
+
+/// Translation counters: blocks compiled, nanoseconds spent compiling,
+/// cached blocks dropped because the words under them changed, and
+/// translations reused from the content cache. A program that rewrites its
+/// own P memory can spend more time rebuilding code than running it, and no
+/// execution profile shows that.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CJitStats {
+    pub compiles: u64,
+    pub compile_ns: u64,
+    pub invalidations: u64,
+    pub cache_hits: u64,
+}
+
+/// Read the translation counters.
+///
+/// # Safety
+/// `dsp` must be a valid pointer to a `DspJit`; `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJitStats) {
+    let dsp = unsafe { &*dsp };
+    let JitStats {
+        compiles,
+        compile_ns,
+        invalidations,
+        cache_hits,
+    } = dsp.jit.stats;
+    unsafe {
+        *out = CJitStats {
+            compiles,
+            compile_ns,
+            invalidations,
+            cache_hits,
+        };
+    }
 }
 
 /// Read a word from DSP memory.
