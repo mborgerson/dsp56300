@@ -1500,8 +1500,11 @@ impl<'a> Emitter<'a> {
     /// being block terminators. The repeated instruction executes LC times
     /// inside a native loop with no per-iteration run-loop overhead.
     ///
-    /// Returns `(inst_count, end_pc)`.
-    pub fn emit_block(&mut self, start_pc: u32, max_len: u32, stop_pc: u32) -> u32 {
+    /// Returns `(end_pc, ends_open)`, where `ends_open` means the block ran
+    /// out of instruction budget (or PRAM) rather than reaching a terminator
+    /// or a DO-loop boundary - the run loop re-dispatches straight into the
+    /// next instruction, so it is a dispatch the cap created.
+    pub fn emit_block(&mut self, start_pc: u32, max_len: u32, stop_pc: u32) -> (u32, bool) {
         let p_end = self.map.p_space_end();
         let mut pc = start_pc;
         let mut count = 0u32;
@@ -1652,7 +1655,7 @@ impl<'a> Emitter<'a> {
             self.store_u32(OFF_PC_ADVANCE, one);
         }
 
-        pc
+        (pc, !ended_with_terminator)
     }
 
     // helpers: DspState field access
