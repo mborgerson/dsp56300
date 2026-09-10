@@ -863,3 +863,71 @@ fn test_modulo_negative_nn_wrap_jit() {
     );
     assert_eq!(s.registers[reg::R0], 1, "mode 5: R0 should not be updated");
 }
+
+#[test]
+fn test_modulo_pointer_advances_inside_a_repeated_instruction() {
+    // `jit_update_rn` handles every addressing mode except linear, and it
+    // writes Rn straight to memory. The address load at the top of a REP or
+    // inline-DO body is emitted before the update, so it reuses the promoted
+    // Rn variable across the backedge; unless the helper's arm redefines it,
+    // iterations 2..n address off the value Rn had on entry, and a repeated
+    // `move a,y:(r5)-` under modulo addressing writes one cell n times while
+    // Rn itself ends up correct. Linear addressing is unaffected, because
+    // its fast path assigns the variable.
+    //
+    // `body` is the loop construct under test; the repeated instruction and
+    // the register state are the same either way.
+    fn run(body: &[u32], stepped: bool) -> (u32, Vec<u32>) {
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        for (i, w) in body.iter().enumerate() {
+            pram[i] = *w;
+        }
+        pram[body.len()] = 0x0C0000 | (body.len() as u32); // park
+        for (i, v) in yram.iter_mut().enumerate() {
+            *v = 0x100000 + i as u32; // an untouched cell stays recognisable
+        }
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        for i in 0..8 {
+            s.registers[reg::M0 + i] = REG_MASKS[reg::M0];
+        }
+        s.registers[reg::M5] = 3; // modulo 4: the buffer is Y:$64..$67
+        s.registers[reg::SR] = 0xC0_0300;
+        s.registers[reg::OMR] = 0x0300;
+        s.registers[reg::R5] = 0x66;
+        if stepped {
+            while s.cycle_count < 16 {
+                run_one(&mut s, &mut jit);
+            }
+        } else {
+            s.run(&mut jit, 16);
+        }
+        let written = (0x60..0x70)
+            .filter(|&i| yram[i] != 0x100000 + i as u32)
+            .map(|i| i as u32)
+            .collect();
+        (s.registers[reg::R5], written)
+    }
+
+    const MOVE: u32 = 0x5E5500; // move a,y:(r5)-
+
+    // rep #3 / move a,y:(r5)-
+    let repeated = [0x0603A0, MOVE];
+    assert_eq!(
+        run(&repeated, false),
+        (0x67, vec![0x64, 0x65, 0x66]),
+        "REP: the modulo pointer did not advance between iterations"
+    );
+    assert_eq!(run(&repeated, false), run(&repeated, true));
+
+    // do #3,$0003 / move a,y:(r5)- (the inline-DO body takes the same path)
+    let looped = [0x060380, 0x000003, MOVE, MOVE];
+    assert_eq!(
+        run(&looped, false),
+        (0x64, vec![0x64, 0x65, 0x66, 0x67]),
+        "inline DO: the modulo pointer did not advance between iterations"
+    );
+    assert_eq!(run(&looped, false), run(&looped, true));
+}

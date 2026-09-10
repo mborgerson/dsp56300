@@ -159,6 +159,17 @@ impl<'a> Emitter<'a> {
         self.builder
             .ins()
             .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, numreg_val, modifier]);
+        // The helper writes Rn in memory. Eagerly reload the promoted
+        // variable rather than leaving it to `merge_conditional`'s lazy
+        // invalidation (see refresh_promoted_reg): the address load at the
+        // top of a REP or inline-DO body is emitted BEFORE this point, so it
+        // reuses the variable across the backedge - and on this arm nothing
+        // else redefines it. Iterations 2..n would then address off the
+        // value Rn had on entry, so a REP'd `move a,y:(r5)-` under modulo
+        // or reverse-carry addressing would write one cell n times while Rn
+        // itself ended up correct. The linear arm defines the variable
+        // through store_reg, so only this arm needs it.
+        self.refresh_promoted_reg(r_idx);
         self.end_conditional_arm(&mut cond_state);
         self.builder.ins().jump(merge_blk, &[]);
 
