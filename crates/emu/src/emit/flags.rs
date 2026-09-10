@@ -298,6 +298,13 @@ impl<'a> Emitter<'a> {
         use crate::core::jit_update_nz;
         let real = jit_update_nz as *const () as usize;
         self.emit_call_sr_helper_pure(real, acc_val);
+        // The helper rewrites all four E/U/N/Z bits from acc_val, so from
+        // here on this straight-line path SR's quarter is architecturally
+        // current - but only if this point dominates what follows (not
+        // inside a conditional arm). See `eunz_current`.
+        if self.cond_depth == 0 {
+            self.eunz_current = true;
+        }
     }
 
     /// `update_nz_now` unless the caller has established that E/U/N/Z are

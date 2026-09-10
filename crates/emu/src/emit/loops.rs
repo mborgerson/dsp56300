@@ -55,6 +55,9 @@ impl<'a> Emitter<'a> {
 
         self.builder.switch_to_block(bail);
         self.builder.seal_block(bail);
+        // The bail arm's materialization runs only on the bail path; the
+        // continue block below must not inherit its `eunz_current`.
+        let saved_eunz_current = self.eunz_current;
         if let Some(result56) = deferred_nz {
             self.emit_deferred_nz(result56);
         }
@@ -66,6 +69,7 @@ impl<'a> Emitter<'a> {
 
         self.builder.switch_to_block(cont);
         self.builder.seal_block(cont);
+        self.eunz_current = saved_eunz_current;
     }
 
     /// Mask a value to 16-bit LC width using REG_MASKS[reg::LC].
@@ -356,6 +360,8 @@ impl<'a> Emitter<'a> {
         // defer its final flag computation across the back edge only if it
         // emits no site that could observe SR mid-iteration.
         let hazard_mark = self.defer_hazard_sites;
+        // Each iteration re-enters here with the quarter possibly elided.
+        self.eunz_current = false;
         let lc_cur = self.load_reg(reg::LC);
         self.emit_instruction(&next_inst, next_pc, next_next_word);
 
@@ -416,6 +422,9 @@ impl<'a> Emitter<'a> {
         // body-defined variables that are undefined on the annul path.
         self.builder.switch_to_block(after_loop);
         self.builder.seal_block(after_loop);
+        // The annul path skips the loop (and any exit materialization),
+        // so the quarter is not provably current past the merge.
+        self.eunz_current = false;
         self.invalidate_promoted();
 
         // 9. Restore LC from TEMP - and flush it: the invalidate above
@@ -505,6 +514,8 @@ impl<'a> Emitter<'a> {
         // computation across the back edge only if it emits no site that
         // could observe SR (or leave compiled code) mid-iteration.
         let hazard_mark = self.defer_hazard_sites;
+        // Each iteration re-enters here with the quarter possibly elided.
+        self.eunz_current = false;
         let body_start = do_pc + 2;
         let mut body_pc = body_start;
         while body_pc <= la {
@@ -596,6 +607,9 @@ impl<'a> Emitter<'a> {
         // variable over valid state.
         self.builder.switch_to_block(after_loop);
         self.builder.seal_block(after_loop);
+        // The annul path skips the loop (and any exit materialization),
+        // so the quarter is not provably current past the merge.
+        self.eunz_current = false;
         self.invalidate_promoted();
     }
 

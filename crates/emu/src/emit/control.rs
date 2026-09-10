@@ -591,6 +591,11 @@ impl<'a> Emitter<'a> {
 
         // Evaluate condition BEFORE ALU (uses current CCR)
         let cond = self.eval_cc(cc);
+        // SR ends as a runtime select between post-ALU and the pre-ALU
+        // snapshot (or is restored outright), so the quarter is current
+        // after this instruction only if it already was before it - the
+        // materialization forced by post_sr's load must not upgrade it.
+        let pre_eunz_current = self.eunz_current;
 
         // Save accumulators and SR before ALU op
         let save_a = self.load_acc(Accumulator::A);
@@ -623,6 +628,8 @@ impl<'a> Emitter<'a> {
             self.builder.def_var(self.sm_needs_sat_var, zero);
             self.store_reg(reg::SR, save_sr);
         }
+
+        self.eunz_current = pre_eunz_current;
 
         // Conditionally restore accumulators (if cc false, undo ALU writes)
         let post_a = self.load_acc(Accumulator::A);

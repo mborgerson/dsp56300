@@ -11,8 +11,17 @@ impl<'a> Emitter<'a> {
                 // condition evaluation, a guest move, SR stacking, a
                 // helper argument. See `defer_hazard_sites`. Transparent
                 // reads (`load_sr_transparent`) provably cannot, and do
-                // not gate the deferral.
-                if !self.sr_read_transparent {
+                // not gate the deferral. Neither does a dominated read:
+                // when a full-quarter materialization already ran this
+                // iteration on every path here (`eunz_current`), or the
+                // flush this load is about to emit rewrites all four bits,
+                // the read cannot see the stale elided quarter.
+                let dominated = self.eunz_current
+                    || self
+                        .pending_flags
+                        .as_ref()
+                        .is_some_and(|f| f.rewrites_eunz());
+                if !self.sr_read_transparent && !dominated {
                     self.defer_hazard_sites += 1;
                 }
             }
@@ -227,6 +236,10 @@ impl<'a> Emitter<'a> {
         // dominate every path; leaving them pending would let a flush inside
         // one arm strand the update on the other arm's path.
         self.flush_pending_flags();
+        // Arms start after this point; their materializations do not
+        // dominate the merge and must not set `eunz_current`. The flush
+        // above is pre-branch and still counts.
+        self.cond_depth += 1;
         self.conditional_snapshot()
     }
 
@@ -245,6 +258,7 @@ impl<'a> Emitter<'a> {
     /// always dead, before the next instruction's writer could elide them.
     pub(super) fn begin_conditional_keep_flags(&mut self) -> ConditionalState {
         self.cond_keep_flags += 1;
+        self.cond_depth += 1;
         self.conditional_snapshot()
     }
 
@@ -310,6 +324,8 @@ impl<'a> Emitter<'a> {
     /// were actually modified in any arm. Marks them as "valid at scope entry"
     /// so subsequent lazy loads use inline memory reads.
     pub(super) fn merge_conditional(&mut self, state: &ConditionalState) {
+        debug_assert!(self.cond_depth > 0);
+        self.cond_depth -= 1;
         let scope = self.scope_stack.last_mut().unwrap();
         for &idx in &PROMOTED_REGS {
             if state.modified[idx] {
