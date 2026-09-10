@@ -194,6 +194,10 @@ impl<'a> Emitter<'a> {
         // dominate every path; leaving them pending would let a flush inside
         // one arm strand the update on the other arm's path.
         self.flush_pending_flags();
+        self.conditional_snapshot()
+    }
+
+    fn conditional_snapshot(&mut self) -> ConditionalState {
         ConditionalState {
             saved_dirty: self.promoted.dirty,
             saved_acc_dirty: self.promoted.acc_dirty,
