@@ -16,8 +16,14 @@ use crate::core::{DspState, InterruptState, MemoryMap, PowerState, REG_MASKS, in
 use crate::emit::Emitter;
 use dsp56300_core::{Instruction, decode, mask_pc};
 
-/// Maximum instructions per basic block.
-const MAX_BLOCK_LEN: u32 = 128;
+/// Longest block the translator will build.
+///
+/// Sits on the flat part of the dispatch-overhead curve
+/// (`bench_block_dispatch_overhead`): host time per DSP cycle falls
+/// steeply up to a cap of about 24 and is flat from there to 120. A larger
+/// cap merges loop bodies this one splits, but removing a dispatch does not
+/// remove the work it dispatched, so throughput does not move.
+const MAX_BLOCK_LEN: u32 = 32;
 
 /// Compiled function signature: takes a pointer to DspState, returns cycles.
 type CompiledFn = unsafe fn(*mut DspState) -> i32;
@@ -93,6 +99,9 @@ pub struct JitEngine {
     translations: HashMap<(u32, u32), Vec<(Box<[u32]>, CompiledFn)>>,
     /// Total candidates held, so the cache can be bounded.
     translation_count: usize,
+    /// Instruction cap for the blocks this engine compiles. `MAX_BLOCK_LEN`
+    /// except in the bench that measures what the cap costs.
+    max_block_len: u32,
     /// Translation accounting. Cheap enough to keep unconditional, and the
     /// only thing that distinguishes a slow program from one whose code is
     /// being rebuilt faster than it runs.
@@ -163,6 +172,7 @@ impl JitEngine {
             block_profile: None,
             translations: HashMap::new(),
             translation_count: 0,
+            max_block_len: MAX_BLOCK_LEN,
             stats: JitStats::default(),
         }
     }
@@ -533,7 +543,7 @@ impl JitEngine {
         {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
-            end_pc = emitter.emit_block(start_pc, MAX_BLOCK_LEN, stop_pc);
+            end_pc = emitter.emit_block(start_pc, self.max_block_len, stop_pc);
             let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
             emitter.finalize_and_return(frontend_config);
         }
@@ -995,6 +1005,75 @@ mod tests {
             s.registers[reg::A0] < 10,
             "block at $02 executed stale code after $00 was recompiled"
         );
+    }
+
+    /// How much of a DSP cycle's cost is the run loop rather than the code it
+    /// dispatches. Same instruction, same total cycles, two block lengths:
+    /// the difference is the per-block overhead.
+    ///
+    /// `cap` is the emitter's instruction cap, swept independently of the
+    /// program's shape. Sweeping only `block_len` cannot measure the cap:
+    /// with the cap at 32 a 40- and a 120-instruction body both compile to
+    /// 32-instruction blocks, and what varies between them is how much code
+    /// the host is cycling through, not how long a block is.
+    ///
+    /// Run with: cargo test --release -p dsp56300-emu --lib bench_block -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn bench_block_dispatch_overhead() {
+        fn time_cycles(block_len: usize, cap: u32, total_cycles: u32) -> (f64, f64, f64) {
+            let mut jit = JitEngine::new(PRAM_SIZE);
+            jit.max_block_len = cap;
+            let mut xram = [0u32; XRAM_SIZE];
+            let mut yram = [0u32; YRAM_SIZE];
+            let mut pram = [0u32; PRAM_SIZE];
+            // A ring of blocks, each `block_len` INC A instructions ended by a
+            // JMP to the next; the last jumps back to the first.
+            let nblocks = 8;
+            let stride = block_len + 2; // body + 2-word JMP
+            for b in 0..nblocks {
+                let start = b * stride;
+                for i in 0..block_len {
+                    pram[start + i] = 0x000008; // INC A
+                }
+                let next = if b + 1 == nblocks {
+                    0
+                } else {
+                    (b + 1) * stride
+                };
+                pram[start + block_len] = 0x0AF080; // JMP >
+                pram[start + block_len + 1] = next as u32;
+            }
+            let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+            s.pc = 0;
+            s.run(&mut jit, 20000); // warm the cache
+            let before = s.cycle_count;
+            let blocks_before = jit.stats.block_entries;
+            let t0 = std::time::Instant::now();
+            s.run(&mut jit, total_cycles as i32);
+            let ns = t0.elapsed().as_nanos() as f64;
+            let cycles = (s.cycle_count - before) as f64;
+            let blocks = (jit.stats.block_entries - blocks_before) as f64;
+            (ns / cycles, ns / blocks, cycles / blocks)
+        }
+
+        let total = 20_000_000;
+        println!("-- program shape held at a 120-instruction body, cap swept --");
+        for cap in [4u32, 8, 16, 24, 32, 40, 48, 64, 96, 120] {
+            let (ns_cyc, ns_blk, cyc_blk) = time_cycles(120, cap, total);
+            println!(
+                "cap {:3}: {:5.2} ns/cyc, {:6.1} ns/block, {:5.1} cyc/block",
+                cap, ns_cyc, ns_blk, cyc_blk
+            );
+        }
+        println!("-- cap held at 128 (never binds), body swept --");
+        for len in [4usize, 14, 40, 120] {
+            let (ns_cyc, ns_blk, cyc_blk) = time_cycles(len, 128, total);
+            println!(
+                "body {:3} instr: {:5.2} ns/cyc, {:6.1} ns/block, {:5.1} cyc/block",
+                len, ns_cyc, ns_blk, cyc_blk
+            );
+        }
     }
 
     #[test]
