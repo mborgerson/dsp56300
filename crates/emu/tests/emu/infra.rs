@@ -1047,6 +1047,11 @@ fn test_dump_profile() {
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("hits"));
     assert!(contents.contains("total_cycles"));
+    // Host time per block, and the profiler's own cost stated separately
+    // so the correction applied to every line can be checked.
+    assert!(contents.contains("ns/cyc"));
+    assert!(contents.contains("total_ns:"));
+    assert!(contents.contains("profiler_probe_ns:"));
     assert!(contents.contains("P-SPACE DUMP OF TOP 20 BLOCKS"));
     assert!(contents.contains("0000.."));
     std::fs::remove_file(&path).ok();
