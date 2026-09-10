@@ -186,7 +186,16 @@ impl JitEngine {
     fn new_module() -> JITModule {
         let mut flag_builder = settings::builder();
         let _ = flag_builder.set("opt_level", "none");
-        let _ = flag_builder.set("enable_verifier", "false");
+        // Cranelift's verifier is what proves a promoted-register or
+        // deferred-flag SSA value still dominates its uses after an emitter
+        // change. It roughly doubles translation time, so debug builds pay
+        // it and release builds do not.
+        let verify = if cfg!(debug_assertions) {
+            "true"
+        } else {
+            "false"
+        };
+        let _ = flag_builder.set("enable_verifier", verify);
         let _ = flag_builder.set("unwind_info", "false");
         let _ = flag_builder.set("regalloc_algorithm", "single_pass");
         let isa_builder = cranelift_native::builder().unwrap();
