@@ -501,7 +501,10 @@ pub struct DspState {
     pub map: MemoryMap,
 
     /// Bitmask of unimplemented-feature warnings already printed (warn once per bit).
-    warned_bits: u32,
+    pub(crate) warned_bits: u32,
+    /// Last unimplemented-mode bit combination already reported, so the cold
+    /// path is entered once per distinct combination rather than per block.
+    pub(crate) unimpl_reported: u32,
 }
 
 impl DspState {
@@ -537,6 +540,7 @@ impl DspState {
             pram_dirty: PramDirtyBitmap::new(map.p_space_end() as usize),
             map,
             warned_bits: 0,
+            unimpl_reported: 0,
         }
     }
 
@@ -595,15 +599,21 @@ impl DspState {
 
     /// Warn once per unimplemented feature bit when guest code enables it.
     #[inline]
-    fn check_unimplemented_modes(&mut self) {
+    pub(crate) fn check_unimplemented_modes(&mut self) {
         // Fast path: combined mask of all unimplemented SR bits we care about.
         const SR_UNIMPL: u32 = (1 << sr::SC) | (1 << sr::SA) | (1 << sr::DM);
         const OMR_UNIMPL: u32 = (1 << 20) | (1 << 7); // SEN, MS
         let sr = self.registers[reg::SR];
         let omr = self.registers[reg::OMR];
-        if (sr & SR_UNIMPL) | (omr & OMR_UNIMPL) == 0 {
+        let bits = (sr & SR_UNIMPL) | (omr & OMR_UNIMPL);
+        if bits == 0 || bits == self.unimpl_reported {
+            // Nothing set, or exactly the combination already warned about.
+            // A program that sets one of these bits permanently would
+            // otherwise run the cold path on every block dispatch for its
+            // whole life.
             return;
         }
+        self.unimpl_reported = bits;
         self.check_unimplemented_modes_slow();
     }
 
