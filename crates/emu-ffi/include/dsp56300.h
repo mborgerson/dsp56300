@@ -182,6 +182,7 @@ typedef struct {
   uint64_t cache_hits;
   uint64_t retained;
   uint64_t block_entries;
+  uint64_t code_bytes;
 } Dsp56300JitStats;
 
 /**

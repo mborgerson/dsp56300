@@ -351,6 +351,7 @@ pub struct CJitStats {
     pub cache_hits: u64,
     pub retained: u64,
     pub block_entries: u64,
+    pub code_bytes: u64,
 }
 
 /// Read the translation counters.
@@ -367,6 +368,7 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
         cache_hits,
         retained,
         block_entries,
+        code_bytes,
         // Diagnostics for the block profile's dump, not part of the C ABI.
         // Named rather than elided so a new counter still has to be
         // considered here.
@@ -381,6 +383,7 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
             cache_hits,
             retained,
             block_entries,
+            code_bytes,
         };
     }
 }

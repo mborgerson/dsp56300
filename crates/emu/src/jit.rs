@@ -138,6 +138,11 @@ pub struct JitStats {
     /// Dispatches whose block hit the instruction cap. Every one of these
     /// forces a further dispatch that a larger cap would have absorbed.
     pub block_ends_open: u64,
+    /// Machine-code bytes emitted, live and evicted alike: how much code the
+    /// host's instruction cache has been asked to hold. Measured, it is what
+    /// sets the cost of a block dispatch - see
+    /// `bench_block_dispatch_overhead`.
+    pub code_bytes: u64,
 }
 
 /// A retained translation: the words it was compiled from, the function,
@@ -632,10 +637,10 @@ impl JitEngine {
             .declare_anonymous_function(&self.ctx.func.signature)
             .unwrap();
         module.define_function(func_id, &mut self.ctx).unwrap();
-        #[cfg(target_os = "linux")]
         let code_size = self.ctx.compiled_code().unwrap().code_buffer().len();
         module.clear_context(&mut self.ctx);
         module.finalize_definitions().unwrap();
+        self.stats.code_bytes += code_size as u64;
 
         let code_ptr = module.get_finalized_function(func_id);
 
