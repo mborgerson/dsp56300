@@ -179,6 +179,11 @@ pub enum InterruptState {
     /// instruction that would exceed it is annulled and becomes the
     /// exception frame's saved PC (silicon-probed).
     Armed = 3,
+    /// A core fault that armed while another fault was in flight
+    /// ("parked"): silicon defers its delivery on a completion
+    /// countdown instead of dispatching immediately (probe_ill_in_shadow
+    /// family). See `InterruptPipeline::parked_countdown`.
+    Parked = 4,
 }
 
 /// Sentinel for "no fault shadow budget recorded".
@@ -214,6 +219,7 @@ impl From<u8> for InterruptState {
             1 => Self::Fast,
             2 => Self::Long,
             3 => Self::Armed,
+            4 => Self::Parked,
             _ => Self::None,
         }
     }
@@ -226,6 +232,7 @@ impl std::fmt::Display for InterruptState {
             Self::Fast => f.write_str("fast"),
             Self::Long => f.write_str("long"),
             Self::Armed => f.write_str("armed"),
+            Self::Parked => f.write_str("parked"),
         }
     }
 }
@@ -248,6 +255,20 @@ pub struct InterruptPipeline {
     /// `INVALID_FAULT_BUDGET` docs for per-class values). Enables the
     /// Armed shadow model; `INVALID_FAULT_BUDGET` when unknown.
     pub fault_budget: u32,
+    /// Completion countdown for a Parked core fault (one that armed
+    /// while another fault was in flight). Silicon delivers a parked
+    /// fault 6 instruction completions after the prior fault's
+    /// dispatch; a guest SP WRITE during the countdown defers
+    /// delivery to at least 3 completions after the write, SP reads
+    /// do not defer (probe_ill_in_shadow / _pad / _noclean /
+    /// _noaccess / _earlywrite). The pipeline's stage-0
+    /// completion arm runs on the 4th completion after delivery, so
+    /// the hook there seeds this countdown with 3.
+    pub parked_countdown: u32,
+    /// Set by a guest SP write while state == Parked; consumed by the
+    /// next countdown tick (the deferral counts from after the
+    /// writing instruction's own completion).
+    pub parked_sp_write: bool,
 }
 
 impl Default for InterruptPipeline {
@@ -273,6 +294,8 @@ impl InterruptPipeline {
             ipl,
             ipl_to_raise: 0,
             fault_budget: INVALID_FAULT_BUDGET,
+            parked_countdown: 0,
+            parked_sp_write: false,
         }
     }
 
@@ -746,10 +769,45 @@ impl DspState {
                     // Pipeline complete, re-enable interrupts
                     self.interrupts.saved_pc = 0xFFFF;
                     self.interrupts.vector_addr = 0xFFFF;
+                    // A core fault that armed while this fault was in
+                    // flight parks: silicon delivers it 6 completions
+                    // after this fault's dispatch. This arm runs on the
+                    // 4th completion after delivery (stage hits 0 on
+                    // the 3rd; the completion arm fires the tick
+                    // after), so 3 completions remain
+                    // (probe_ill_in_shadow family).
+                    if self.interrupts.pending(interrupt::ILLEGAL)
+                        || self.interrupts.pending(interrupt::STACK_ERROR)
+                        || self.interrupts.pending(interrupt::TRAP)
+                    {
+                        self.interrupts.state = InterruptState::Parked;
+                        self.interrupts.parked_countdown = 3;
+                        self.interrupts.parked_sp_write = false;
+                        return;
+                    }
                     self.interrupts.state = InterruptState::None;
                 }
                 _ => return,
             }
+        }
+
+        // A parked core fault counts down completions to its delivery;
+        // a guest SP write during the countdown defers it to at least
+        // 3 completions after the writing instruction (silicon-probed:
+        // max(dispatch+6, last_sp_write+3) fits all five
+        // probe_ill_shadow* variants; SP reads do not defer).
+        if self.interrupts.state == InterruptState::Parked {
+            if self.interrupts.parked_countdown > 0 {
+                self.interrupts.parked_countdown -= 1;
+            }
+            if self.interrupts.parked_sp_write {
+                self.interrupts.parked_sp_write = false;
+                self.interrupts.parked_countdown = self.interrupts.parked_countdown.max(3);
+            }
+            if self.interrupts.parked_countdown == 0 {
+                self.deliver_parked_fault();
+            }
+            return;
         }
 
         // An armed core fault owns the window until delivery; don't
@@ -824,6 +882,27 @@ impl DspState {
         let instr = self.read_memory(MemSpace::P, self.pc);
         self.detect_long_interrupt(instr);
         self.interrupts.pipeline_stage = 3;
+    }
+
+    /// Deliver a parked core fault (see the Parked countdown in
+    /// `process_pending_interrupts`). Vector selection mirrors the
+    /// arbitration loop (first pending IPL-3 source in index order);
+    /// dispatch mirrors `deliver_armed_fault`. The parked fault's own
+    /// stream budget does not apply: silicon delivers with zero
+    /// additional shadow words - the saved PC is the next unexecuted
+    /// instruction (probe_ill_in_shadow family).
+    fn deliver_parked_fault(&mut self) {
+        let idx = (0..interrupt::COUNT)
+            .find(|&i| self.interrupts.pending(i) && self.interrupts.ipl[i] == 3);
+        let Some(idx) = idx else {
+            self.interrupts.state = InterruptState::None;
+            return;
+        };
+        self.interrupts.clear_pending(idx);
+        let vba = self.registers[reg::VBA] & 0xFFFF00;
+        self.interrupts.vector_addr = vba | interrupt::vector_addr(idx) as u32;
+        self.interrupts.ipl_to_raise = 3;
+        self.deliver_armed_fault();
     }
 
     /// Detect whether the instruction at the interrupt vector is a long
@@ -1142,6 +1221,13 @@ pub unsafe extern "C" fn jit_write_ssl(state: *mut DspState, value: u32) {
 pub unsafe extern "C" fn jit_write_sp(state: *mut DspState, value: u32) {
     let state = unsafe { &mut *state };
     let mask = REG_MASKS[reg::SP];
+    // A guest SP write while a parked fault is counting down defers
+    // its delivery to at least 3 completions after this instruction
+    // (silicon, probe_ill_in_shadow/_pad; SP reads do not
+    // defer).
+    if state.interrupts.state == InterruptState::Parked {
+        state.interrupts.parked_sp_write = true;
+    }
     // Writing the SE bit into SP is itself a stack error (silicon,
     // probe_irq_sp_write_se/_2w: boundary = write start + 6
     // words flat). A UF-only write does NOT fault at the write; the
