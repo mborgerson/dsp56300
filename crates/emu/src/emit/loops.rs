@@ -315,6 +315,75 @@ impl<'a> Emitter<'a> {
         true
     }
 
+    /// Check whether the skip region of a straight-line forward branch at
+    /// `branch_pc` (taken target `target`, from `forward_skip_target`) can
+    /// compile as a structured conditional skip inside `emit_block`
+    /// instead of terminating the block. Same rules as the in-loop scan
+    /// minus the loop-frame ones, with one addition: exit-check
+    /// instructions (peripheral writes) are allowed in the region - their
+    /// early-return spill (`flush_all_to_memory`) is side-path safe, and
+    /// the skip opener flushed the promotion cache, so memory is current
+    /// on the return path too. The merge target must stay strictly inside
+    /// any enclosing DO frame (`stop_pc` = LA+1): a taken branch to LA+1
+    /// would otherwise become a sequential arrival there and trigger the
+    /// run loop's loop-back where hardware does not loop.
+    ///
+    /// Returns the region's instruction count (nested skip openers
+    /// included) for the caller's block budget, or None to fall back to
+    /// the block-terminator form.
+    pub(super) fn straightline_skip_region_len(
+        map: &MemoryMap,
+        branch_pc: u32,
+        branch_len: u32,
+        target: u32,
+        stop_pc: u32,
+    ) -> Option<u32> {
+        let p_end = map.p_space_end();
+        if target < branch_pc + branch_len || target >= stop_pc || target > p_end {
+            return None;
+        }
+        // Open nested skip targets, innermost last (see the in-loop scan).
+        let mut open_skips: Vec<u32> = Vec::new();
+        let mut pc = branch_pc + branch_len;
+        let mut count = 0u32;
+        while pc < target {
+            while open_skips.last() == Some(&pc) {
+                open_skips.pop();
+            }
+            let inst = decode::decode(map.read_pram(pc));
+            let inst_len = decode::instruction_length(&inst);
+            let nw = map.read_pram(mask_pc(pc + 1));
+
+            if let Some(inner) = Self::forward_skip_target(&inst, pc, nw) {
+                // Forward and well-nested inside the innermost open region.
+                if inner < pc + inst_len || inner > *open_skips.last().unwrap_or(&target) {
+                    return None;
+                }
+                open_skips.push(inner);
+                pc += inst_len;
+                count += 1;
+                continue;
+            }
+            if Self::is_do_instruction(&inst)
+                || Self::is_rep_instruction(&inst)
+                || Self::is_block_terminator(&inst)
+                || Self::writes_p_memory(&inst)
+            {
+                return None;
+            }
+            pc += inst_len;
+            count += 1;
+        }
+        // A two-word instruction straddling a merge point misaligns the
+        // region: the outer target via the overshoot check, a nested one
+        // by never popping (only nested targets equal to the outer merge
+        // may remain; emission closes those LIFO at the merge itself).
+        if pc != target || open_skips.iter().any(|&t| t != target) {
+            return None;
+        }
+        Some(count)
+    }
+
     /// Count instructions in a DO loop body [body_start, la] for the
     /// emit_block instruction budget. Only called after is_do_body_inlineable
     /// returned true, so we know the body is well-formed.

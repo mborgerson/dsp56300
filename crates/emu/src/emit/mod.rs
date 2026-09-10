@@ -1622,8 +1622,26 @@ impl<'a> Emitter<'a> {
         let mut pc = start_pc;
         let mut count = 0u32;
         let mut ended_with_terminator = false;
+        // Open forward-skip merge targets, innermost last (mirrors
+        // emit_do_inline). Every mid-loop `break` below happens with this
+        // empty: the region scan admits no terminator, DO/REP, P-write,
+        // or loop-boundary crossing, and the budget precheck keeps whole
+        // regions inside max_len.
+        let mut open_skips: Vec<(u32, Block, ConditionalState)> = Vec::new();
 
         loop {
+            while open_skips.last().is_some_and(|(t, _, _)| *t == pc) {
+                let (_, merge_blk, mut cond_state) = open_skips.pop().unwrap();
+                // Path-accurate cycles: the fall-through arm's charge
+                // lands inside the arm, matching step mode where skipped
+                // instructions never execute.
+                self.flush_pending_cycles();
+                self.end_conditional_arm(&mut cond_state);
+                self.builder.ins().jump(merge_blk, &[]);
+                self.builder.switch_to_block(merge_blk);
+                self.builder.seal_block(merge_blk);
+                self.merge_conditional(&cond_state);
+            }
             if count >= max_len || pc >= p_end {
                 break;
             }
@@ -1633,6 +1651,49 @@ impl<'a> Emitter<'a> {
 
             let inst = decode::decode(opcode);
             let inst_len = decode::instruction_length(&inst);
+
+            // Forward conditional skip in straight-line code: compile as a
+            // structured conditional instead of a block terminator (the
+            // same shape `emit_do_inline` handles inside loop bodies also
+            // splits the mixing kernels' non-loop blocks). The merge
+            // target stays a jump target from elsewhere, so its tail also
+            // compiles into whatever block starts there - accepted code
+            // growth, like inline DO nests.
+            if let Some(target) = Self::forward_skip_target(&inst, pc, next_word) {
+                let accepted = if let Some((enclosing, _, _)) = open_skips.last() {
+                    // Nested opener: validated by the outermost
+                    // opener's region scan.
+                    debug_assert!(target >= pc + inst_len && target <= *enclosing);
+                    true
+                } else {
+                    matches!(
+                        Self::straightline_skip_region_len(
+                            self.map, pc, inst_len, target, stop_pc,
+                        ),
+                        Some(n) if count + 1 + n <= max_len
+                    )
+                };
+                if accepted {
+                    // The predicate runs unconditionally (operand
+                    // read side effects included), exactly as the
+                    // branch instruction would evaluate it.
+                    self.cur_inst_pc = pc;
+                    self.cur_decode_len = inst_len;
+                    let taken = self.emit_skip_predicate(&inst);
+                    let merge_blk = self.builder.create_block();
+                    let fall_blk = self.builder.create_block();
+                    let cond_state = self.begin_conditional_skip();
+                    self.builder
+                        .ins()
+                        .brif(taken, merge_blk, &[], fall_blk, &[]);
+                    self.builder.switch_to_block(fall_blk);
+                    self.builder.seal_block(fall_blk);
+                    open_skips.push((target, merge_blk, cond_state));
+                    pc += inst_len;
+                    count += 1;
+                    continue;
+                }
+            }
 
             // REP: compile as inline Cranelift loop instead of block terminator
             if Self::is_rep_instruction(&inst) {
@@ -1733,6 +1794,8 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
+
+        debug_assert!(open_skips.is_empty());
 
         // Set final PC.
         //
