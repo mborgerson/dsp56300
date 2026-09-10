@@ -408,18 +408,22 @@ fn test_run_rep() {
 
 #[test]
 fn test_rep_lc_zero() {
-    // REP #0 repeats 65,536 times (page 13-160)
+    // REP #0 executes the target zero times (hardware-verified; diverges
+    // from the 56300FM's "65,536 repeats" on page 13-160).
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::LC] = 0x42;
     pram[0] = 0x0600A0; // rep #0
-    pram[1] = 0x000000; // nop (repeated instruction)
+    pram[1] = 0x000008; // inc a (repeated instruction - must not run)
 
     run_one(&mut s, &mut jit); // REP
-    assert!(s.loop_rep);
-    assert_eq!(s.registers[reg::LC], 0x10000); // 65536 iterations
+    assert!(!s.loop_rep, "REP #0 cancels immediately");
+    assert_eq!(s.pc, 2, "target skipped");
+    assert_eq!(s.registers[reg::A0], 0, "target executed zero times");
+    assert_eq!(s.registers[reg::LC], 0x42, "LC restored");
 }
 
 #[test]
@@ -833,7 +837,7 @@ fn test_do_body_rep_unsafe_repeated() {
     pram[0] = 0x060180;
     pram[1] = 0x0004;
     pram[2] = 0x000008; // INC A
-    pram[3] = 0x060120; // REP #1
+    pram[3] = 0x0601A0; // REP #1
     pram[4] = 0x076084; // movem X0,P:(R0) -- writes P memory (repeated inst)
     pram[5] = 0x0C0005; // JMP $5 (halt)
     s.run(&mut jit, 100);
@@ -853,7 +857,7 @@ fn test_do_body_rep_past_la() {
     pram[0] = 0x060180;
     pram[1] = 0x0003;
     pram[2] = 0x000008; // INC A
-    pram[3] = 0x060120; // REP #1 (at la=3, rep_next=4, past la)
+    pram[3] = 0x0601A0; // REP #1 (at la=3, rep_next=4, past la)
     pram[4] = 0x000008; // INC A (repeated)
     pram[5] = 0x0C0005; // JMP $5 (halt)
     s.run(&mut jit, 100);
@@ -1499,8 +1503,9 @@ fn test_brkcc_restores_la_lc_lf_fv() {
 }
 
 #[test]
-fn test_rep_reg_lc_zero_65536() {
-    // REP with register source = 0 must repeat 65536 times (per DSP56300FM).
+fn test_rep_reg_lc_zero_skips() {
+    // REP with register source = 0 executes the target zero times
+    // (hardware-verified; diverges from the 56300FM).
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -1512,17 +1517,12 @@ fn test_rep_reg_lc_zero_65536() {
     pram[2] = 0x000000; // nop (after rep)
     pram[3] = 0x0C0003; // jmp $3 (halt)
     s.run(&mut jit, 70000);
-    // After 65536 increments: A = 0x010000
     assert_eq!(
         s.registers[reg::A0],
-        0x010000,
-        "REP with LC=0 must repeat 65536 times"
-    );
-    assert_eq!(
-        s.registers[reg::A1],
         0,
-        "A1 must be 0 (no overflow from A0)"
+        "REP with LC=0 must not execute the target"
     );
+    assert_eq!(s.registers[reg::A1], 0, "A1 must be 0");
     assert_eq!(s.pc, 3, "PC should be at halt after REP completes");
 }
 
