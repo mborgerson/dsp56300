@@ -882,6 +882,71 @@ mod tests {
     }
 
     #[test]
+    fn test_movem_rewrite_seen_by_every_entry_point() {
+        // The program rewrites its own P memory with MOVEM and then re-enters
+        // the rewritten words, which is the shape an overlay load takes.
+        // Unlike the tests above it never touches pram_dirty by hand:
+        // the write goes through the compiled block's memory helper, so this
+        // covers marking and eviction together.
+        //
+        //         move  #>$000000,x0
+        //         move  #L2,r0
+        //         jsr   L2          ; caches a block at L2
+        //         movem x0,p:(r0)+  ; L2's INC A becomes NOP
+        //         jsr   L1          ; L1's block spans L2 - recompiles
+        //         jsr   L2          ; must not run the cached INC A
+        //         jmp   END
+        // L1:     nop
+        // L2:     inc a
+        //         rts
+        // END:    jmp END
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let prog: [(usize, u32); 18] = [
+            (0x20, 0x44F400),
+            (0x21, 0x000000),
+            (0x22, 0x60F400),
+            (0x23, 0x00002E),
+            (0x24, 0x0BF080),
+            (0x25, 0x00002E),
+            (0x26, 0x075884),
+            (0x27, 0x0BF080),
+            (0x28, 0x00002D),
+            (0x29, 0x0BF080),
+            (0x2A, 0x00002E),
+            (0x2B, 0x0AF080),
+            (0x2C, 0x000030),
+            (0x2D, 0x000000),
+            (0x2E, 0x000008),
+            (0x2F, 0x00000C),
+            (0x30, 0x0AF080),
+            (0x31, 0x000030),
+        ];
+        for (addr, word) in prog {
+            pram[addr] = word;
+        }
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+        s.pc = 0x20;
+        for _ in 0..16 {
+            if s.pc == 0x30 {
+                break;
+            }
+            s.run(&mut jit, 8);
+        }
+        assert_eq!(s.pc, 0x30, "program did not reach the parking loop");
+        // INC A ran once, before the rewrite. A second increment means the
+        // block cached at L2 kept running the word the MOVEM replaced.
+        assert_eq!(
+            s.registers[reg::A0],
+            1,
+            "L2 executed stale code after the MOVEM rewrote it"
+        );
+    }
+
+    #[test]
     fn test_profiling_enable_and_counters() {
         let mut jit = JitEngine::new(PRAM_SIZE);
         assert!(!jit.is_profiling());
