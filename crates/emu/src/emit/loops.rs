@@ -267,6 +267,13 @@ impl<'a> Emitter<'a> {
             if Self::writes_p_memory(&inst) {
                 return false;
             }
+            // A fault-arming instruction inside an inline body would post
+            // its armed stream-word budget mid-loop and iterate uncharged;
+            // the block-boundary path bails at the armer instead (see
+            // emit_fault_arm_bail).
+            if Self::may_arm_stack_fault(&inst) {
+                return false;
+            }
 
             if Self::is_rep_instruction(&inst) {
                 if !open_skips.is_empty() {
@@ -280,10 +287,16 @@ impl<'a> Emitter<'a> {
                 let rep_opcode = map.read_pram(rep_next);
                 let rep_inst = decode::decode(rep_opcode);
                 let rep_len = decode::instruction_length(&rep_inst);
-                // The repeated instruction must also be safe.
+                // The repeated instruction must also be safe - including
+                // not arming faults mid-loop, and not being the
+                // manual-restricted REP/DO target the legacy fallback in
+                // emit_block handles.
                 if Self::is_block_terminator(&rep_inst)
                     || Self::needs_exit_check(&rep_inst)
                     || Self::writes_p_memory(&rep_inst)
+                    || Self::may_arm_stack_fault(&rep_inst)
+                    || Self::is_rep_instruction(&rep_inst)
+                    || Self::is_do_instruction(&rep_inst)
                 {
                     return false;
                 }
@@ -821,6 +834,51 @@ impl<'a> Emitter<'a> {
             }
             _ => unreachable!("not a DO instruction"),
         }
+    }
+
+    /// The step path's first call after a legacy REP, compiled: REP with
+    /// LC=0 does not execute the target (hardware-verified; diverges from
+    /// the 56300FM's "65,536 repeats") - annul it, restore LC from TEMP
+    /// and drop the REP context; otherwise clear pc_on_rep and land on
+    /// the (necessarily one-word) target. Mirrors `advance_pc`'s
+    /// pc_on_rep arm exactly. Used when `emit_block` emits a REP through
+    /// the legacy `loop_rep` machinery instead of inlining (a target that
+    /// can arm a core fault, or a manual-restricted REP/DO target): the
+    /// block ends here and the run loop steps while `loop_rep` is live,
+    /// so the remaining iterations run the step leg's exact semantics.
+    pub(super) fn emit_rep_first_call_arm(&mut self, rep_pc: u32) {
+        self.flush_pending_cycles();
+        let lc = self.load_reg(reg::LC);
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let annul = self.builder.ins().icmp(IntCC::Equal, lc, zero);
+
+        let zero_blk = self.builder.create_block();
+        let run_blk = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.ins().brif(annul, zero_blk, &[], run_blk, &[]);
+
+        self.builder.switch_to_block(zero_blk);
+        self.builder.seal_block(zero_blk);
+        let off = self.builder.ins().iconst(types::I8, 0);
+        self.store_bool(OFF_LOOP_REP, off);
+        let saved = self.load_reg(reg::TEMP);
+        self.store_reg(reg::LC, saved);
+        let skip_pc = self.builder.ins().iconst(types::I32, (rep_pc + 2) as i64);
+        self.store_pc(skip_pc);
+        self.builder.ins().jump(merge, &[]);
+
+        self.builder.switch_to_block(run_blk);
+        self.builder.seal_block(run_blk);
+        let off2 = self.builder.ins().iconst(types::I8, 0);
+        self.store_bool(OFF_PC_ON_REP, off2);
+        let tgt_pc = self.builder.ins().iconst(types::I32, (rep_pc + 1) as i64);
+        self.store_pc(tgt_pc);
+        self.builder.ins().jump(merge, &[]);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        // PC was stored explicitly on both arms - branch-style block end.
+        self.set_inst_len(0);
     }
 
     /// Common REP setup: save LC to TEMP, set loop_rep and pc_on_rep.

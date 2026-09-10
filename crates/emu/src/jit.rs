@@ -1053,6 +1053,23 @@ impl DspState {
                 continue;
             }
 
+            // A live legacy REP context is step-path state: blocks neither
+            // consult nor advance loop_rep, so dispatching one here would
+            // execute the repeated instruction exactly once and leave the
+            // context stuck. Reached when a fault delivered mid-REP (the
+            // Armed stepping above ends with loop_rep still set) or when a
+            // block ended on the legacy fallback for an uninlineable REP
+            // target; step until the REP context retires.
+            if self.loop_rep {
+                let consumed = self.step_one(jit);
+                self.cycle_budget -= consumed;
+                if let Some(ref mut profile) = jit.block_profile {
+                    profile.dispatch.step_count += 1;
+                    profile.dispatch.step_ticks += read_ticks().wrapping_sub(t_top);
+                }
+                continue;
+            }
+
             let pc = self.pc;
 
             // PC outside the configured PRAM: fall back to single-step.
