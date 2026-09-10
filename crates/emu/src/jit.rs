@@ -110,6 +110,12 @@ pub struct JitStats {
     pub invalidations: u64,
     /// Translations reused from the content cache instead of rebuilt.
     pub cache_hits: u64,
+    /// Translations currently retained, against `MAX_TRANSLATIONS`.
+    pub retained: u64,
+    /// Times the run loop dispatched a compiled block. With the cycles
+    /// retired, this gives the average block length and so how much of the
+    /// per-cycle cost is dispatch rather than generated code.
+    pub block_entries: u64,
 }
 
 /// A retained translation: the words it was compiled from, the function,
@@ -232,6 +238,7 @@ impl JitEngine {
         // is about to be freed.
         self.translations.clear();
         self.translation_count = 0;
+        self.stats.retained = 0;
         if let Some(old) = self.module.replace(Self::new_module()) {
             unsafe { old.free_memory() };
         }
@@ -500,6 +507,7 @@ impl JitEngine {
             .or_default()
             .push((block_words(map, start_pc, block.end_pc), block.func));
         self.translation_count += 1;
+        self.stats.retained = self.translation_count as u64;
         block
     }
 
@@ -729,6 +737,7 @@ impl DspState {
             }
 
             let block = jit.cache.blocks[pc as usize].unwrap();
+            jit.stats.block_entries += 1;
             let consumed = unsafe { (block.func)(self as *mut DspState) };
             self.exit_requested = false;
 
