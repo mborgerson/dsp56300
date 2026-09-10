@@ -57,6 +57,12 @@ impl<'a> Emitter<'a> {
             // stores run after take() and must not clobber a marker their
             // own flush still consumes.
             if self.pending_flags.take().is_some() {
+                assert!(
+                    self.cond_keep_flags == 0,
+                    "SR store discarding pending flags inside a keep-flags \
+                     conditional arm (pc=${:06x})",
+                    self.cur_inst_pc,
+                );
                 self.pending_sm_marker = None;
                 let zero = self.builder.ins().iconst(types::I32, 0);
                 self.builder.def_var(self.sm_needs_sat_var, zero);
@@ -197,6 +203,31 @@ impl<'a> Emitter<'a> {
         self.conditional_snapshot()
     }
 
+    /// `begin_conditional` that carries a pending flag computation across
+    /// the conditional instead of materializing it. Sound only when neither
+    /// arm can read or write SR or defer flags of its own - the pending SSA
+    /// values were defined before the brif, so they dominate the merge and
+    /// the computation may materialize later on either path. The guard
+    /// (`cond_keep_flags`) turns any materializing flush inside the region
+    /// into an emission-time panic, so a violating arm cannot silently
+    /// strand the update on one path. End the region with
+    /// `end_conditional_keep_flags` after `merge_conditional`.
+    ///
+    /// Used by `emit_update_rn`, whose linear/modulo split would otherwise
+    /// materialize every mac loop's flags once per parallel move, almost
+    /// always dead, before the next instruction's writer could elide them.
+    pub(super) fn begin_conditional_keep_flags(&mut self) -> ConditionalState {
+        self.cond_keep_flags += 1;
+        self.conditional_snapshot()
+    }
+
+    /// Close a `begin_conditional_keep_flags` region. Call after
+    /// `merge_conditional`.
+    pub(super) fn end_conditional_keep_flags(&mut self) {
+        debug_assert!(self.cond_keep_flags > 0);
+        self.cond_keep_flags -= 1;
+    }
+
     fn conditional_snapshot(&mut self) -> ConditionalState {
         ConditionalState {
             saved_dirty: self.promoted.dirty,
@@ -217,8 +248,13 @@ impl<'a> Emitter<'a> {
         // Arm-scoped deferred flags must materialize inside the arm; past
         // the merge their SSA values don't dominate and the update would
         // apply on paths that didn't take this arm. (No current instruction
-        // defers flags inside an arm; this guards the invariant.)
-        self.flush_pending_flags();
+        // defers flags inside an arm; this guards the invariant.) In a
+        // keep-flags region the pending computation predates the branch
+        // and is deliberately carried past the merge - flushing it here
+        // would defeat the region (and trip its guard).
+        if self.cond_keep_flags == 0 {
+            self.flush_pending_flags();
+        }
         for &idx in &PROMOTED_REGS {
             if self.promoted.dirty[idx] && !state.saved_dirty[idx] {
                 self.flush_reg(idx);

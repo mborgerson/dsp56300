@@ -122,7 +122,13 @@ impl<'a> Emitter<'a> {
         // jit_update_rn wrote in the nonlinear path.
         self.promoted.dirty[r_idx] = false;
 
-        let mut cond_state = self.begin_conditional();
+        // Carry any pending flag computation across this conditional:
+        // neither arm touches SR or defers flags, and materializing here
+        // put one `jit_update_nz` call on every post-update parallel move,
+        // nearly all of them overwritten unread by the next instruction.
+        // Deferring lets that instruction's writer elide the dead ones at
+        // `set_pending`.
+        let mut cond_state = self.begin_conditional_keep_flags();
         self.builder
             .ins()
             .brif(is_linear, linear_blk, &[], nonlinear_blk, &[]);
@@ -176,5 +182,6 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(merge_blk);
         self.builder.seal_block(merge_blk);
         self.merge_conditional(&cond_state);
+        self.end_conditional_keep_flags();
     }
 }

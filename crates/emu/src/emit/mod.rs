@@ -341,6 +341,11 @@ pub struct Emitter<'a> {
     sm_needs_sat_var: Variable,
     /// Deferred flag computation. Set by ALU ops, flushed when SR is read.
     pending_flags: Option<PendingFlags>,
+    /// Depth of `begin_conditional_keep_flags` regions. While non-zero, a
+    /// materializing flag flush or a pending-discarding SR store is an
+    /// emission-time panic - it would strand the carried computation on
+    /// one arm of the conditional.
+    pub(crate) cond_keep_flags: u32,
     /// `sm_needs_sat_var` as it stood when `pending_flags` was recorded.
     /// Snapshotting it there frees `emit_saturate_sm` from having to
     /// materialize the previous instruction's computation before it may
@@ -448,6 +453,7 @@ impl<'a> Emitter<'a> {
             instructions_block,
             sm_needs_sat_var,
             pending_flags: None,
+            cond_keep_flags: 0,
             pending_sm_marker: None,
             cur_inst_pc: 0,
             cur_inst_len: 0,
