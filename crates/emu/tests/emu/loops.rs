@@ -2577,3 +2577,33 @@ fn test_enddo_does_not_restore_ccr_or_ipl() {
         "ENDDO: C should NOT be restored from stack"
     );
 }
+
+#[test]
+fn test_run_rep_zero_alu_body_flags_untouched() {
+    // REP with LC=0 executes the body zero times (hardware-verified); the
+    // body ALU op's CCR update must not leak out of the inline loop on the
+    // zero-iteration path (hardware capture: sr keeps clr's U|Z).
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    xram[0x26] = 0; // rep count read from X:$26
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::R4] = 0x26;
+    s.registers[reg::M4] = 0xFFFFFF;
+    s.registers[reg::X1] = 1;
+    pram[0] = 0x200013; // clr A            -> sets U|Z
+    pram[1] = 0x065420; // rep x:(r4)-      (LC = 0)
+    pram[2] = 0x200060; // add X1,A         (must execute zero times)
+    pram[3] = 0x0C0003; // jmp $0003 (halt)
+
+    s.run(&mut jit, 1000);
+    assert_eq!(s.registers[reg::A1], 0, "add must not execute");
+    assert_eq!(s.registers[reg::R4], 0x25, "post-decrement still applies");
+    let ccr = s.registers[reg::SR] & 0xFF;
+    assert_eq!(
+        ccr,
+        (1 << sr::U) | (1 << sr::Z),
+        "CCR must still show clr's U|Z, got {ccr:02x}"
+    );
+}
