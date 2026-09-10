@@ -318,15 +318,18 @@ impl<'a> Emitter<'a> {
         let next_inst = decode::decode(next_opcode);
 
         // 3. Create Cranelift loop with deferred pre-loop block. The loop
-        // is while-style: the LC test sits at the header, so REP with LC=0
-        // executes the target zero times (hardware-verified; diverges
-        // from the 56300FM's "65,536 repeats"). Keeping
-        // the exit branch inside the loop scope means no control path
-        // bypasses the pre-loop deferred register loads.
+        // is do-while-style with an entry annul guard: REP with LC=0
+        // executes the target zero times (hardware-verified; diverges from
+        // the 56300FM's "65,536 repeats") by branching straight to the
+        // merge, and the loop's exit edge leaves from the LC-decrement at
+        // the body's bottom - so a deferred E/U/N/Z result, defined in the
+        // body, dominates the exit where it materializes. The pre-loop
+        // block still sits between the guard and the body, so no control
+        // path into the loop bypasses its deferred register loads.
         let pre_loop = self.builder.create_block();
-        let loop_header = self.builder.create_block();
-        let loop_body = self.builder.create_block();
+        let loop_top = self.builder.create_block();
         let loop_exit = self.builder.create_block();
+        let after_loop = self.builder.create_block();
 
         self.flush_pending_cycles(); // flush pre-REP cycles before entering loop
         // Pre-REP CCR state must materialize before the loop: the body may
@@ -338,39 +341,50 @@ impl<'a> Emitter<'a> {
         // target) clears compile-time dirty flags globally - without this,
         // pre-REP register state would never reach memory on the skip path.
         self.flush_promoted();
-        self.builder.ins().jump(pre_loop, &[]);
-        self.builder.switch_to_block(loop_header);
-        // Don't seal loop_header yet - back-edge pending
-
-        // 4. Push loop scope; header tests LC, body runs the instruction
-        self.push_loop_scope(pre_loop);
-        let lc_cur = self.load_reg(reg::LC);
         let zero = self.builder.ins().iconst(types::I32, 0);
-        let done = self.builder.ins().icmp(IntCC::Equal, lc_cur, zero);
+        let annul = self.builder.ins().icmp(IntCC::Equal, lc_val, zero);
         self.builder
             .ins()
-            .brif(done, loop_exit, &[], loop_body, &[]);
-        self.builder.switch_to_block(loop_body);
-        self.builder.seal_block(loop_body);
+            .brif(annul, after_loop, &[], pre_loop, &[]);
+        self.builder.switch_to_block(loop_top);
+        // Don't seal loop_top yet - back-edge pending
+
+        // 4. Push loop scope; the body IS the loop head: run the repeated
+        // instruction, then decrement and test at the bottom.
+        self.push_loop_scope(pre_loop);
+        // Snapshot the hazard counter (see emit_do_inline): the body may
+        // defer its final flag computation across the back edge only if it
+        // emits no site that could observe SR mid-iteration.
+        let hazard_mark = self.defer_hazard_sites;
+        let lc_cur = self.load_reg(reg::LC);
         self.emit_instruction(&next_inst, next_pc, next_next_word);
 
-        // 5. Decrement LC and loop back to the header test. Decrement the
-        // header's SSA value (lc_cur), not a load_reg: a flush/invalidate
-        // inside the body (callback reads, P writes) would otherwise turn
-        // this into a stale memory reload and the loop would never
-        // terminate.
+        // 5. Decrement LC and branch: back to the top, or out.
         self.flush_pending_cycles(); // flush body cycles once per iteration
-        // The body's CCR update must land inside the loop: its SSA values
-        // are defined in the body and must not leak to the exit path, where
-        // they would misreport flags for the zero-iteration case.
-        self.flush_pending_flags();
-        // Flush the body's register writes to memory each iteration: the
-        // exit edge leaves from the HEADER (pre-body), so variables defined
-        // only in the body have no definition on the zero-iteration path -
-        // the merged exit must treat memory as authoritative (see the
-        // invalidate below; found by fuzzing: a zero-count REP whose body
-        // wrote a register zero-clobbered it at block end).
+        // The body's final CCR update materializes once per iteration. When
+        // nothing in the body can observe SR mid-iteration, the E/U/N/Z
+        // helper call - a pure overwrite, dead on every iteration but the
+        // last - defers to the loop exit and runs once, on the final
+        // iteration's result; the sticky/overwrite V/C/L/SM half still
+        // lands per iteration. REP is not preemptible (silicon locks out
+        // interrupts for its duration, and no quantum check is emitted),
+        // so the exit is the only materialization site.
+        let deferred_nz = if self.defer_hazard_sites == hazard_mark {
+            self.flush_pending_flags_backedge_deferring_eunz()
+        } else {
+            self.flush_pending_flags();
+            None
+        };
+        // Flush the body's register writes to memory each iteration:
+        // conditional-arm merges invalidate their destinations, and the
+        // resulting inline memory reloads re-execute every iteration -
+        // memory must be current at each iteration boundary for those
+        // reloads to be sound (mirrors emit_do_inline).
         self.flush_promoted();
+        // Decrement the top-of-body SSA value (lc_cur), not a load_reg: a
+        // flush/invalidate inside the body (callback reads, P writes)
+        // would otherwise turn this into a stale memory reload and the
+        // loop would never terminate.
         let one = self.builder.ins().iconst(types::I32, 1);
         let new_lc = self.builder.ins().isub(lc_cur, one);
         let new_lc = self.mask_lc(new_lc);
@@ -379,21 +393,32 @@ impl<'a> Emitter<'a> {
         // emit_lc_decrement_and_branch): the store lands after the
         // body-bottom flush.
         self.flush_reg(reg::LC);
-        self.builder.ins().jump(loop_header, &[]);
+        let done = self.builder.ins().icmp(IntCC::Equal, new_lc, zero);
+        self.builder.ins().brif(done, loop_exit, &[], loop_top, &[]);
 
         // 6. Pop loop scope and emit pre-loop block with targeted loads
-        self.pop_loop_scope(loop_header);
+        self.pop_loop_scope(loop_top);
 
-        // 7. Switch to loop exit. Both incoming paths (zero iterations via
-        // the header, N iterations via per-iteration flushes) left memory
-        // authoritative; invalidate the promotion cache so downstream code
-        // reloads from memory instead of using body-defined variables that
-        // are undefined on the zero-iteration path.
+        // 7. Loop exit: materialize the deferred backedge E/U/N/Z call on
+        // the last iteration's result (this edge leaves the body bottom,
+        // so the body-defined value dominates it), then merge.
         self.builder.switch_to_block(loop_exit);
         self.builder.seal_block(loop_exit);
+        if let Some(result56) = deferred_nz {
+            self.emit_deferred_nz(result56);
+        }
+        self.flush_promoted();
+        self.builder.ins().jump(after_loop, &[]);
+
+        // 8. Merge point (loop exit or annul skip). Both incoming paths
+        // left memory authoritative; invalidate the promotion cache so
+        // downstream code reloads from memory instead of using
+        // body-defined variables that are undefined on the annul path.
+        self.builder.switch_to_block(after_loop);
+        self.builder.seal_block(after_loop);
         self.invalidate_promoted();
 
-        // 8. Restore LC from TEMP - and flush it: the invalidate above
+        // 9. Restore LC from TEMP - and flush it: the invalidate above
         // makes downstream loads (e.g. an enclosing inline-DO's LC
         // decrement) reload from memory, which still holds the REP's
         // exhausted count until this store reaches it.
@@ -513,7 +538,8 @@ impl<'a> Emitter<'a> {
         // The V/C/L/SM half still lands per iteration: L and the SM V/L
         // are sticky ORs. The exit edge leaves from the LC-decrement block
         // at the body's bottom, so the body-defined result dominates every
-        // materialization site.
+        // materialization site. (REP inlines defer the same way; see
+        // emit_rep_inline.)
         let deferred_nz = if self.defer_hazard_sites == hazard_mark {
             self.flush_pending_flags_backedge_deferring_eunz()
         } else {
