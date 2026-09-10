@@ -1779,12 +1779,16 @@ impl<'a> Emitter<'a> {
                 }
             }
             CondCode::NN | CondCode::NR => {
+                // NR: Z + U̅·E̅ = 1 (normalized); NN is its complement
+                // (manual table 12-18). Hardware-verified:
+                // a1=$400000 (Z=0 U=0 E=0) takes JNR, not JNN.
                 let z = self.extract_bit(sr_val, sr::Z);
                 let u = self.extract_bit(sr_val, sr::U);
                 let e = self.extract_bit(sr_val, sr::E);
                 let not_u = self.builder.ins().bxor(u, one);
-                let not_u_and_e = self.builder.ins().band(not_u, e);
-                let expr = self.builder.ins().bor(z, not_u_and_e);
+                let not_e = self.builder.ins().bxor(e, one);
+                let not_u_and_not_e = self.builder.ins().band(not_u, not_e);
+                let expr = self.builder.ins().bor(z, not_u_and_not_e);
                 if cc == CondCode::NN {
                     self.builder.ins().bxor(expr, one)
                 } else {

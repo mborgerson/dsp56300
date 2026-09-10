@@ -836,21 +836,21 @@ fn test_condition_codes() {
     run_one(&mut s, &mut jit);
     assert_eq!(s.registers[reg::A1], m);
 
-    // NN: taken when Z+(!U&E)=0 (not normalized)
-    // With Z=0, U=0, E=0: !U&E = 1&0 = 0, Z|0 = 0 -> NN is true
-    s.registers[reg::A1] = 0;
-    s.registers[reg::A0] = 0;
-    s.registers[reg::A2] = 0;
-    s.registers[reg::SR] = 0;
-    run_one(&mut s, &mut jit);
-    assert_eq!(s.registers[reg::A1], m);
-
-    // NR: taken when Z+(!U&E)=1 (normalized)
-    // With Z=0, U=0, E=1: !U&E = 1&1 = 1, Z|1 = 1 -> NR is true
+    // NN: taken when Z+(!U&!E)=0 (not normalized; manual 12-18,
+    // hardware-verified). With Z=0, U=0, E=1: !U&!E = 0 -> NN true
     s.registers[reg::A1] = 0;
     s.registers[reg::A0] = 0;
     s.registers[reg::A2] = 0;
     s.registers[reg::SR] = 1 << sr::E;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::A1], m);
+
+    // NR: taken when Z+(!U&!E)=1 (normalized)
+    // With Z=0, U=0, E=0: !U&!E = 1 -> NR is true
+    s.registers[reg::A1] = 0;
+    s.registers[reg::A0] = 0;
+    s.registers[reg::A2] = 0;
+    s.registers[reg::SR] = 0;
     run_one(&mut s, &mut jit);
     assert_eq!(s.registers[reg::A1], m);
 
