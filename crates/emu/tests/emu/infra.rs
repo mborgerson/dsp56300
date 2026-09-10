@@ -2546,11 +2546,10 @@ fn test_rep_not_interruptible() {
 
 #[test]
 fn test_s_flag_scale_up() {
-    // DSP56300FM Table 5-1: In scale-up mode (S1=1, S0=0),
-    // S flag checks bits 47:46 (instead of 47:45 in no-scaling).
-    // S = 1 when bits 47 and 46 differ.
-    // A = $00:C00000:000000. bit47=1, bit46=1. Same => S=0.
-    // A = $00:800000:000000. bit47=1, bit46=0. Differ => S=1.
+    // Silicon-verified (bank b11 srm_scl_s_flag): in
+    // scale-up mode the S flag watches bits 45^44 - the pair moves
+    // WITH the scaling direction.
+    // A = $00:200000:000000. bit45=A1[21]=1, bit44=0. Differ => S=1.
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -2561,7 +2560,7 @@ fn test_s_flag_scale_up() {
     // PM0: move a,x:(r0)+ x0,a (reads A through data shifter).
     s.registers[reg::SR] = 1 << sr::S1;
     s.registers[reg::A2] = 0x00;
-    s.registers[reg::A1] = 0x800000; // bit47=1, bit46=0 => S=1 in scale-up
+    s.registers[reg::A1] = 0x200000; // bit45=1, bit44=0 => S=1 in scale-up
     s.registers[reg::A0] = 0x000000;
     s.registers[reg::X0] = 0x000000;
     s.registers[reg::R0] = 0x000000;
@@ -2573,15 +2572,16 @@ fn test_s_flag_scale_up() {
     let s_flag = (s.registers[reg::SR] >> sr::S) & 1;
     assert_eq!(
         s_flag, 1,
-        "S flag should be set when bits 47:46 differ (scale-up)"
+        "S flag should be set when bits 45:44 differ (scale-up)"
     );
 }
 
 #[test]
 fn test_s_flag_scale_down() {
-    // DSP56300FM Table 5-1: In scale-down mode (S1=0, S0=1),
-    // S flag checks bits 45:44 (A45 XOR A44).
-    // A = $00:200000:000000. bit45=A1[21]=1, bit44=A1[20]=0. Differ => S=1.
+    // Silicon-verified (bank b11 srm_scl_s_flag): in
+    // scale-down mode the S flag watches bits 47^46 - the pair moves
+    // WITH the scaling direction.
+    // A = $00:800000:000000. bit47=A1[23]=1, bit46=A1[22]=0. Differ => S=1.
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -2590,7 +2590,7 @@ fn test_s_flag_scale_down() {
 
     s.registers[reg::SR] = 1 << sr::S0; // scale-down (S1=0, S0=1)
     s.registers[reg::A2] = 0x00;
-    s.registers[reg::A1] = 0x200000; // bit45=1 (A1[21]), bit44=0 (A1[20]) => differ => S=1
+    s.registers[reg::A1] = 0x800000; // bit47=1, bit46=0 => differ => S=1
     s.registers[reg::A0] = 0x000000;
     s.registers[reg::X0] = 0x000000;
     s.registers[reg::R0] = 0x000000;
@@ -2602,7 +2602,7 @@ fn test_s_flag_scale_down() {
     let s_flag = (s.registers[reg::SR] >> sr::S) & 1;
     assert_eq!(
         s_flag, 1,
-        "S flag should be set when bits 45:44 differ (scale-down)"
+        "S flag should be set when bits 47:46 differ (scale-down)"
     );
 }
 

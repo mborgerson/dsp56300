@@ -1289,12 +1289,14 @@ pub unsafe extern "C" fn jit_read_accu24(state: *mut DspState, acc_idx: u32) -> 
         new_sr |= 1 << sr::L;
     }
 
-    // S flag: adjacent bits differ in the unscaled accumulator
+    // S flag: adjacent bits differ in the unscaled accumulator. The
+    // examined pair moves WITH the scaling mode: scale down watches
+    // 47^46, scale up watches 45^44 (silicon-verified).
     let acc_packed =
         ((a2 as u64 & 0xFF) << 48) | ((a1 as u64 & 0xFF_FFFF) << 24) | (a0 as u64 & 0xFF_FFFF);
     let s_bit = match scaling {
-        1 => ((acc_packed >> 45) ^ (acc_packed >> 44)) & 1, // scale down
-        2 => ((acc_packed >> 47) ^ (acc_packed >> 46)) & 1, // scale up
+        1 => ((acc_packed >> 47) ^ (acc_packed >> 46)) & 1, // scale down
+        2 => ((acc_packed >> 45) ^ (acc_packed >> 44)) & 1, // scale up
         _ => ((acc_packed >> 46) ^ (acc_packed >> 45)) & 1, // no scaling
     };
     if s_bit != 0 {
