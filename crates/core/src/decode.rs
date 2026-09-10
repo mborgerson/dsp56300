@@ -841,6 +841,38 @@ fn has_invalid_register(inst: &Instruction) -> bool {
 }
 
 /// Decode a 24-bit DSP56300 instruction word.
+/// All OPCODE_TABLE entry names, in table order (coverage tooling).
+pub fn opcode_table_names() -> impl Iterator<Item = &'static str> {
+    OPCODE_TABLE.iter().map(|e| e.name)
+}
+
+/// The OPCODE_TABLE entry name that `opcode` decodes through, or None for
+/// the parallel-move space (>= $100000 and Pm0) and unmatched words.
+/// Mirrors `decode`'s table lookup (coverage tooling).
+pub fn decode_entry_name(opcode: u32) -> Option<&'static str> {
+    if opcode >= 0x100000 || (opcode & 0xFE4000) == 0x080000 {
+        return None;
+    }
+    let prefix = ((opcode >> 16) & 0xF) as usize;
+    let bucket = &PREFIX_TABLE.buckets[prefix];
+    let mut i = 0;
+    while i < bucket.len as usize {
+        let entry = &OPCODE_TABLE[bucket.indices[i] as usize];
+        if (opcode & entry.mask) == entry.match_val {
+            if entry.has_mmmrrr {
+                let mode6 = (opcode >> 11) & 0x7 == 0x6;
+                if (mode6 && !entry.mode6_ok) || !match_mmmrrr(opcode) {
+                    i += 1;
+                    continue;
+                }
+            }
+            return Some(entry.name);
+        }
+        i += 1;
+    }
+    None
+}
+
 pub fn decode(opcode: u32) -> Instruction {
     if opcode >= 0x100000 {
         // Parallel move + ALU instruction
