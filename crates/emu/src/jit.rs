@@ -605,7 +605,19 @@ impl DspState {
 
             if jit.cache.blocks[pc as usize].is_none() {
                 let block = jit.compile_block(pc, stop_pc, self.pram_dirty.generation, &self.map);
-                self.pram_dirty.clear_dirty_range(pc, block.end_pc);
+                // The dirty bits are shared by every block covering these
+                // words, so they can only be cleared once no cached block
+                // still needs them. Blocks overlapping the range are exactly
+                // the ones that may hold stale code, so drop them here;
+                // otherwise a block nested inside this one would find the
+                // bits already cleared, judge itself clean, and keep running
+                // code the write replaced (an overlay load rewrites a region
+                // under a dozen cached entry points at once).
+                if self.pram_dirty.is_range_dirty(pc, block.end_pc) {
+                    jit.cache
+                        .invalidate_range(pc, block.end_pc.saturating_sub(1));
+                    self.pram_dirty.clear_dirty_range(pc, block.end_pc);
+                }
                 jit.cache.blocks[pc as usize] = Some(block);
             }
 
@@ -822,6 +834,51 @@ mod tests {
         assert_ne!(jit.cache.blocks[0].unwrap().generation, gen_before);
         // DEC should have decremented A0 from 10.
         assert!(s.registers[reg::A0] < 10);
+    }
+
+    #[test]
+    fn test_dirty_bit_eviction_overlapping_blocks() {
+        // Two cached blocks can cover overlapping PRAM. Recompiling the
+        // outer one must not launder the inner one: the dirty bits are the
+        // only record that the words changed, and they are shared.
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+        pram[0x00] = 0x000000; // NOP
+        pram[0x01] = 0x000000; // NOP
+        pram[0x02] = 0x000008; // INC A
+        pram[0x03] = 0x0C0010; // JMP $10
+        pram[0x10] = 0x0C0010; // JMP $10 (park)
+
+        // Compile the outer block [$00,$04) and the inner one [$02,$04).
+        s.pc = 0x00;
+        s.run(&mut jit, 8);
+        s.pc = 0x02;
+        s.run(&mut jit, 8);
+        assert!(jit.cache.blocks[0x00].is_some());
+        assert!(jit.cache.blocks[0x02].is_some());
+
+        // Rewrite the word both blocks contain (an overlay load does this).
+        pram[0x02] = 0x00000A; // DEC A
+        s.pram_dirty.mark_dirty(0x02);
+
+        // Entering the outer block recompiles it and clears the dirty range.
+        s.pc = 0x00;
+        s.run(&mut jit, 8);
+
+        // Entering the inner block must run DEC, not the cached INC.
+        s.registers[reg::A0] = 10;
+        s.registers[reg::A1] = 0;
+        s.registers[reg::A2] = 0;
+        s.pc = 0x02;
+        s.run(&mut jit, 8);
+        assert!(
+            s.registers[reg::A0] < 10,
+            "block at $02 executed stale code after $00 was recompiled"
+        );
     }
 
     #[test]
