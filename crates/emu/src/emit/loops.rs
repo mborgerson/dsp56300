@@ -521,8 +521,11 @@ impl<'a> Emitter<'a> {
                 self.builder.ins().iconst(types::I32, *count as i64)
             }
             Instruction::DoForever | Instruction::DorForever => {
-                // DO FOREVER: LC is not updated - load current value to preserve it
-                self.load_reg(reg::LC)
+                // emit_do_lc_value is only called from emit_do_inline, and
+                // emit_block never inlines FOREVER loops (is_do_body_inlineable
+                // rejects them) - the non-inline path goes through
+                // emit_do_or_dor_forever instead.
+                unreachable!("DO/DOR FOREVER is never inlined")
             }
             Instruction::DoReg { reg_idx } | Instruction::DorReg { reg_idx } => {
                 // Manual page 13-56 claims DO SP loads "SP before DO,
