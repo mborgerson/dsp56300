@@ -406,6 +406,15 @@ impl<'a> Emitter<'a> {
         } else if idx == reg::SSH {
             // Reading SSH pops the stack.
             self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
+        } else if idx == reg::A2 || idx == reg::B2 {
+            // Reading A2/B2 through a move sign-extends the 8-bit extension
+            // register to 24 bits (manual read path; hardware-verified:
+            // `move a2,x:` with a2=$FF stores $FFFFFF).
+            let raw = self.load_reg(idx);
+            let sh = self.builder.ins().iconst(types::I32, 24);
+            let widened = self.builder.ins().ishl(raw, sh);
+            let back = self.builder.ins().sshr(widened, sh);
+            self.mask24(back)
         } else {
             self.load_reg(idx)
         }
