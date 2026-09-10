@@ -50,7 +50,17 @@ impl<'a> Emitter<'a> {
     pub(super) fn store_reg(&mut self, idx: usize, val: Value) {
         if idx == reg::SR {
             // Discard pending flags — the direct SR write supersedes them.
-            self.pending_flags = None;
+            // Discarding a pending computation also orphans any deferred
+            // SM saturation marker: a later flag flush would OR the stale
+            // needs_sat V/L into the freshly written SR. Zero it ONLY when
+            // a pending computation is actually discarded — flag-machinery
+            // stores run after take() and must not clobber a marker their
+            // own flush still consumes.
+            if self.pending_flags.take().is_some() {
+                self.pending_sm_marker = None;
+                let zero = self.builder.ins().iconst(types::I32, 0);
+                self.builder.def_var(self.sm_needs_sat_var, zero);
+            }
         }
         let mask = REG_MASKS[idx];
         let v = if mask != 0xFFFFFFFF {
