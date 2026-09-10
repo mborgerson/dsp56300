@@ -1240,6 +1240,16 @@ fn test_decode_move_long_wins_bit_branch_mode6_collision() {
 }
 
 #[test]
+fn test_decode_l_space_mode6_immediate_is_unknown() {
+    // L: parallel moves have no immediate form: the L-space mode-6
+    // immediate bit pattern is unallocated (sim56300 disassembles $40F400
+    // as `dc`; asm56300 rejects "move #imm,a10").
+    assert!(matches!(decode(0x40F400), Instruction::Unknown { .. }));
+    // The X:/Y: long-immediate form remains valid (move #>xxxx,x0).
+    assert!(!matches!(decode(0x44F400), Instruction::Unknown { .. }));
+}
+
+#[test]
 fn test_decode_mode6_unallocated_rows_are_unknown() {
     // brclr/brset/bsclr/bsset/DO/DOR/REP ea forms have no MMM=110
     // encoding: their extension word is already the branch/loop address

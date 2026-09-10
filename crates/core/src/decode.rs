@@ -864,9 +864,14 @@ pub fn decode(opcode: u32) -> Instruction {
             let mmm = (opcode >> 11) & 7;
             let rrr = (opcode >> 8) & 7;
             let value = ((opcode >> 16) & 7) | ((opcode >> 17) & (3 << 3));
-            // X:/Y: case (not L:) with mode-6 immediate
             if value >> 2 != 0 && mmm == 6 && rrr == 4 {
+                // X:/Y: case (not L:) with mode-6 immediate
                 opcode &= !(1 << 19);
+            } else if value >> 2 == 0 && mmm == 6 && rrr == 4 {
+                // L: move with mode-6 immediate is unallocated: there is no
+                // "move #imm,<L reg>" encoding (sim56300 disassembles e.g.
+                // $40F400 as `dc`).
+                return Instruction::Unknown { opcode };
             }
         }
 

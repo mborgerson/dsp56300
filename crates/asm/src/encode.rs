@@ -2096,18 +2096,19 @@ fn encode_parallel_l_abs(
 }
 
 fn encode_parallel_l_imm(
-    imm: &Expr,
-    reg: &Register,
-    alu_byte: u32,
-    sym: &SymbolTable,
-    pc: u32,
+    _imm: &Expr,
+    _reg: &Register,
+    _alu_byte: u32,
+    _sym: &SymbolTable,
+    _pc: u32,
 ) -> Result<EncodedInstruction> {
-    let v = eval(imm, sym, pc)?;
-    let lreg = l_reg_idx(reg)?;
-    let (bit2, bits10) = l_reg_split(lreg);
-    let w0 = (1 << 22) // Pm4/Pm5 class bit
-        | (bit2 << 19) | (bits10 << 16) | (1 << 15) | (1 << 14) | (0x34 << 8) | alu_byte;
-    Ok(words(w0, v & 0xFFFFFF))
+    // There is no immediate-to-L-register encoding: the L-space mode-6
+    // immediate bit pattern is unallocated (sim56300 disassembles it as
+    // `dc`, and asm56300 rejects the source form with "Illegal X field
+    // destination register specified").
+    Err(enc_err(
+        "immediate move to an L register is not a valid instruction",
+    ))
 }
 
 fn pm1_d1_bits(reg: &Register, is_x: bool) -> Result<u32> {
