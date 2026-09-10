@@ -9,8 +9,12 @@ impl<'a> Emitter<'a> {
                 // Any SR read outside the flag-flush machinery's own RMW
                 // may observe bits a backedge deferral leaves stale - a
                 // condition evaluation, a guest move, SR stacking, a
-                // helper argument. See `defer_hazard_sites`.
-                self.defer_hazard_sites += 1;
+                // helper argument. See `defer_hazard_sites`. Transparent
+                // reads (`load_sr_transparent`) provably cannot, and do
+                // not gate the deferral.
+                if !self.sr_read_transparent {
+                    self.defer_hazard_sites += 1;
+                }
             }
             self.flush_pending_flags();
         }
@@ -37,6 +41,22 @@ impl<'a> Emitter<'a> {
                 _ => self.load_u32(Self::reg_offset(idx)),
             }
         }
+    }
+
+    /// `load_reg(SR)` for a consumer that provably cannot observe the
+    /// E/U/N/Z quarter and does not let the value escape: carry reads
+    /// (ADC/SBC/DIV/ROR/ROL, the CC/CS/LC/LS conditions), scaling-bit
+    /// reads (RND), and pure SR read-modify-writes (clear/OR chains,
+    /// ANDI/ORI on MR/CCR, IFcc's snapshot splice). Stale E/U/N/Z bits pass
+    /// through such a site untouched or are copied only within SR, which
+    /// the loop-exit materialization then rewrites, so the read does not
+    /// gate the backedge deferral.
+    pub(super) fn load_sr_transparent(&mut self) -> Value {
+        let prev = self.sr_read_transparent;
+        self.sr_read_transparent = true;
+        let val = self.load_reg(reg::SR);
+        self.sr_read_transparent = prev;
+        val
     }
 
     /// Extract a single sub-register from the promoted i64 accumulator Variable.

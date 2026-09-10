@@ -278,7 +278,9 @@ impl<'a> Emitter<'a> {
     /// Load SR and clear the given flag bits. Returns the cleared SR value.
     /// `flags` is a bitmask, e.g. `(1u32 << sr::N) | (1u32 << sr::Z)`.
     pub(super) fn clear_sr_flags(&mut self, flags: u32) -> Value {
-        let sr = self.load_reg(reg::SR);
+        // Every caller is a pure RMW chain (clear, OR in computed bits,
+        // store back to SR) - deferral-transparent.
+        let sr = self.load_sr_transparent();
         let mask = self.builder.ins().iconst(types::I32, !flags as i64);
         self.builder.ins().band(sr, mask)
     }
