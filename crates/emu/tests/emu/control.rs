@@ -3870,3 +3870,25 @@ fn test_jsclr_pc_dependent_return_addr() {
     run_one(&mut s, &mut jit);
     assert_eq!(s.pc, 0x0012, "RTS should return to $0012");
 }
+
+#[test]
+fn test_sc_tracks_stack_depth() {
+    // SC monitors how many hardware-stack entries are in use; it is
+    // implicitly updated by every push/pop (DSP56300FM 5.4.3.2). Verified
+    // against sim56300: DO shows sc=2 mid-loop (two pushes), balanced
+    // jsr/rts returns sc to 0, and a movec-to-ssh push leaves sc=1.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x0BF080; // jsr >$0005
+    pram[1] = 0x000005;
+    pram[5] = 0x00000C; // rts
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::SC], 1, "jsr pushes: sc=1");
+    assert_eq!(s.registers[reg::SP] & 0xF, 1);
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::SC], 0, "rts pops: sc=0");
+    assert_eq!(s.registers[reg::SP] & 0xF, 0);
+}

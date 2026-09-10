@@ -484,6 +484,10 @@ impl DspState {
         }
 
         self.registers[reg::SP] = (underflow | stack_error | stack) & 0x3F;
+        // SC monitors how many hardware-stack entries are in use; it is
+        // updated implicitly by every push/pop (manual 5.4.3.2). Verified
+        // against sim56300 (DO mid-loop shows sc=2 for its two pushes).
+        self.registers[reg::SC] = (self.registers[reg::SC] + 1) & REG_MASKS[reg::SC];
         let idx = (stack & 0xF) as usize;
         if stack != 0 {
             self.stack[0][idx] = ssh_val & REG_MASKS[reg::SSH];
@@ -505,6 +509,8 @@ impl DspState {
         }
 
         self.registers[reg::SP] = (underflow | stack_error | stack) & 0x3F;
+        // SC counts stack entries in use; decrement on pop (manual 5.4.3.2).
+        self.registers[reg::SC] = self.registers[reg::SC].wrapping_sub(1) & REG_MASKS[reg::SC];
         let ssh = self.registers[reg::SSH];
         let ssl = self.registers[reg::SSL];
         let idx = (stack & 0xF) as usize;
@@ -984,6 +990,8 @@ pub unsafe extern "C" fn jit_write_ssh(state: *mut DspState, value: u32) {
     }
 
     state.registers[reg::SP] = (underflow | stack_error | stack) & 0x3F;
+    // SSH write is a push: SC counts the new entry (manual 5.4.3.2).
+    state.registers[reg::SC] = (state.registers[reg::SC] + 1) & REG_MASKS[reg::SC];
     let idx = (stack & 0xF) as usize;
     if stack != 0 {
         state.stack[0][idx] = value & REG_MASKS[reg::SSH];

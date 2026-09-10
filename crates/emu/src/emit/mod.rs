@@ -1609,6 +1609,14 @@ impl<'a> Emitter<'a> {
         let new_sp = self.builder.ins().band(new_sp, c0x3f);
         self.store_reg(reg::SP, new_sp);
 
+        // SC counts hardware-stack entries in use; every push increments it
+        // (manual 5.4.3.2; mirrored in DspState::stack_push).
+        let sc = self.load_reg(reg::SC);
+        let sc = self.builder.ins().iadd(sc, one);
+        let c0x1f = self.builder.ins().iconst(types::I32, 0x1F);
+        let sc = self.builder.ins().band(sc, c0x1f);
+        self.store_reg(reg::SC, sc);
+
         // Always write to stack array - new_counter = (SP & 0xF) + 1 is in
         // range 1..16 (never 0), matching core.rs which always stores.
         // On overflow (new_counter=16), idx wraps to 0 and overwrites stack[0].
@@ -1689,6 +1697,14 @@ impl<'a> Emitter<'a> {
         let new_sp = self.builder.ins().bor(new_sp, new_counter);
         let new_sp = self.builder.ins().band(new_sp, c0x3f);
         self.store_reg(reg::SP, new_sp);
+
+        // SC counts hardware-stack entries in use; every pop decrements it
+        // (manual 5.4.3.2; mirrored in DspState::stack_pop).
+        let sc = self.load_reg(reg::SC);
+        let sc = self.builder.ins().isub(sc, one);
+        let c0x1f = self.builder.ins().iconst(types::I32, 0x1F);
+        let sc = self.builder.ins().band(sc, c0x1f);
+        self.store_reg(reg::SC, sc);
 
         // Update SSH/SSL to reflect new top of stack
         let new_ssh_addr = self.stack_slot_addr(new_counter, false);
