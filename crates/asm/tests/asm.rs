@@ -1320,8 +1320,10 @@ fn test_move_imm_to_m_reg_uses_movec() {
 }
 
 #[test]
-fn test_parallel_l_imm() {
-    roundtrip("clr a #$123456,a10", 0);
+fn test_parallel_l_imm_rejected() {
+    // No immediate-to-L-register instruction exists (asm56300 rejects it;
+    // sim56300 treats the corresponding bit pattern as `dc`).
+    assert!(assemble_line("clr b #$123456,a10", 0).is_err());
 }
 
 #[test]
@@ -2923,37 +2925,22 @@ fn test_warn_dup_dest_labs_write() {
     );
 }
 
-// --- DuplicateDestination: LImm parallel move (strict overlap check) ---
+// --- DuplicateDestination: immediate parallel move (strict overlap check) ---
 
 #[test]
 fn test_warn_dup_dest_limm_strict() {
-    // LImm dst=a overlaps (a/a1/a10 are strict matches for accumulator A)
+    // ImmToReg dst=a overlaps (a is a strict match for accumulator A)
     let ws = get_warnings("add b,a  #$123456,a");
     assert!(
         ws.iter()
             .any(|w| w.kind == WarningKind::DuplicateDestination),
-        "LImm: dst a overlaps ALU dest a (strict)"
+        "dst a overlaps ALU dest a (strict)"
     );
-    // LImm dst=a10: a10 is a strict match for accumulator A
-    let ws = get_warnings("add b,a  #$123456,a10");
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::DuplicateDestination),
-        "LImm: dst a10 overlaps ALU dest a (strict)"
-    );
-    // LImm dst=b10: b10 does NOT overlap with accumulator A -> no DuplicateDestination,
-    // but it IS an invalid PM4 destination -> gets InvalidPm4Destination instead
-    let ws = get_warnings("add b,a  #$123456,b10");
-    assert!(
-        !ws.iter()
-            .any(|w| w.kind == WarningKind::DuplicateDestination),
-        "LImm: dst b10 does not overlap ALU dest a (strict)"
-    );
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::InvalidPm4Destination),
-        "LImm: dst b10 is invalid PM4 destination"
-    );
+    // Immediate to an L composite register is not a valid instruction
+    // (asm56300 rejects it; the L-space mode-6 immediate row is
+    // unallocated), so these are hard errors, not warnings.
+    assert!(assemble("add b,a  #$123456,a10").is_err());
+    assert!(assemble("add b,a  #$123456,b10").is_err());
 }
 
 // --- DuplicateDestination: XImmReg parallel move ---
@@ -3054,20 +3041,10 @@ fn test_warn_invalid_pm4_dest_xy_abs() {
 
 #[test]
 fn test_warn_invalid_pm4_dest_limm() {
-    // LImm with x composite register (doesn't overlap ALU dest a) -> InvalidPm4Destination
-    let ws = get_warnings("add b,a  #$123456,x");
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::InvalidPm4Destination),
-        "LImm: x (composite) is an invalid PM4 destination"
-    );
-    // LImm with y composite register
-    let ws = get_warnings("add b,a  #$123456,y");
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::InvalidPm4Destination),
-        "LImm: y (composite) is an invalid PM4 destination"
-    );
+    // Immediate to a composite L register is not encodable at all
+    // (asm56300: "Illegal X field destination register specified").
+    assert!(assemble("add b,a  #$123456,x").is_err());
+    assert!(assemble("add b,a  #$123456,y").is_err());
 }
 
 // --- SshSourceAndDest in parallel RegToReg move ---
@@ -3216,22 +3193,20 @@ fn test_instruction_size_bit_test_ea() {
 // --- reg_overlaps_acc_strict: LImm does not warn for A0/B0/A2/B2 ---
 
 #[test]
-fn test_limm_strict_no_warn_for_a0() {
-    // LImm uses strict overlap check. The LImm form (#$xxxxxx,a10) is a 24-bit L-move.
-    // For accumulator A: strict overlap matches A, A1, A10 only (not A0, A2).
-    // a10 IS a strict match (composite mantissa+exponent), so it DOES warn.
-    // b10 does NOT overlap A -> no DuplicateDestination, but gets InvalidPm4Destination.
-    let ws = get_warnings("add b,a  #$123456,b10");
+fn test_imm_to_reg_dup_dest_overlap() {
+    // ImmToReg overlap check: a0 overlaps ALU dest a and warns; an
+    // unrelated register does not.
+    let ws = get_warnings("add b,a  #$123456,a0");
+    assert!(
+        ws.iter()
+            .any(|w| w.kind == WarningKind::DuplicateDestination),
+        "a0 overlaps ALU dest a"
+    );
+    let ws = get_warnings("add b,a  #$123456,y0");
     assert!(
         !ws.iter()
             .any(|w| w.kind == WarningKind::DuplicateDestination),
-        "LImm: b10 does not strictly overlap ALU dest a (no DuplicateDestination)"
-    );
-    // b10 is a composite register that is an invalid PM4 dest
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::InvalidPm4Destination),
-        "LImm: b10 triggers InvalidPm4Destination"
+        "y0 does not overlap ALU dest a"
     );
 }
 
