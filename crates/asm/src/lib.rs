@@ -38,8 +38,6 @@ pub enum WarningKind {
     BitNumberOutOfRange,
     /// ALU destination register duplicated in parallel move destination.
     DuplicateDestination,
-    /// PM4 X-field destination register is invalid (a10, b10, x, y).
-    InvalidPm4Destination,
     /// movec with no control-register operand demotes to the MOVE encoding
     /// (asm56300: "No control registers accessed - using MOVE encoding").
     MovecUsesMoveEncoding,
@@ -860,14 +858,6 @@ fn reg_overlaps_acc(reg: &Register, acc_is_a: bool) -> bool {
     }
 }
 
-/// Check if a register is an invalid PM4 X-field destination (composite registers).
-fn is_invalid_pm4_dest(reg: &Register) -> bool {
-    matches!(
-        reg,
-        Register::A10 | Register::B10 | Register::RegX | Register::RegY
-    )
-}
-
 fn check_parallel_warnings(
     alu: &ParallelAlu,
     pmove: &ParallelMove,
@@ -993,35 +983,6 @@ fn check_parallel_warnings(
             WarningKind::SshSourceAndDest,
             "SSH is both source and destination",
         ));
-    }
-
-    // Check invalid PM4 destination registers.
-    // For LImm, only warn when the invalid dest register does NOT overlap
-    // the ALU dest accumulator (official classifies that as DuplicateDestination).
-    match pmove {
-        ParallelMove::XYMem {
-            reg, write: true, ..
-        }
-        | ParallelMove::XYAbs {
-            reg, write: true, ..
-        } if is_invalid_pm4_dest(reg) => {
-            warnings.push(warn(
-                WarningKind::InvalidPm4Destination,
-                "invalid PM4 destination register",
-            ));
-        }
-        ParallelMove::LImm { reg, .. } => {
-            let overlaps_alu = acc_is_a
-                .map(|is_a| reg_overlaps_acc(reg, is_a))
-                .unwrap_or(false);
-            if is_invalid_pm4_dest(reg) && !overlaps_alu {
-                warnings.push(warn(
-                    WarningKind::InvalidPm4Destination,
-                    "invalid PM4 destination register",
-                ));
-            }
-        }
-        _ => {}
     }
 
     check_post_update_on_dest(pmove, warnings);
