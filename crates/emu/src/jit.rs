@@ -37,6 +37,9 @@ struct CompiledBlock {
     /// PRAM generation at compilation time. When this matches the current
     /// pram_dirty.generation, the dirty bitmap scan is skipped (the block is known clean).
     generation: u32,
+    /// The block ended on the instruction cap, not on a terminator or a DO
+    /// boundary. Its successor dispatch exists only because of the cap.
+    ends_open: bool,
 }
 
 /// Code cache: flat array indexed by start_pc.
@@ -96,7 +99,7 @@ pub struct JitEngine {
     block_profile: Option<Vec<(u64, u64)>>,
     /// Translations kept past invalidation, keyed by the code itself.
     /// Key: (start_pc, stop_pc) -> candidates (the words translated, function).
-    translations: HashMap<(u32, u32), Vec<(Box<[u32]>, CompiledFn)>>,
+    translations: HashMap<(u32, u32), Vec<Translation>>,
     /// Total candidates held, so the cache can be bounded.
     translation_count: usize,
     /// Inline-loop preemption quantum baked into the blocks this engine
@@ -129,6 +132,12 @@ pub struct JitStats {
     /// retired, this gives the average block length and so how much of the
     /// per-cycle cost is dispatch rather than generated code.
     pub block_entries: u64,
+    /// Dispatches whose block was cut short by the enclosing DO loop's LA+1.
+    /// The run loop's loop-back is what these pay for.
+    pub block_ends_do_boundary: u64,
+    /// Dispatches whose block hit the instruction cap. Every one of these
+    /// forces a further dispatch that a larger cap would have absorbed.
+    pub block_ends_open: u64,
 }
 
 /// A retained translation: the words it was compiled from, the function,
@@ -337,6 +346,14 @@ impl JitEngine {
             );
         }
         let _ = writeln!(f, "\ntotal_cycles: {}", total_cycles);
+        // Why blocks end, cumulative over the engine's life. Differenced
+        // between two dumps these say how many dispatches the instruction
+        // cap and the DO-loop boundary each create.
+        let _ = writeln!(
+            f,
+            "block_entries: {}\nblock_ends_open: {}\nblock_ends_do_boundary: {}",
+            self.stats.block_entries, self.stats.block_ends_open, self.stats.block_ends_do_boundary
+        );
 
         // Dump raw P-space words for offline disassembly
         let _ = writeln!(f, "\n\n{}", "=".repeat(80));
@@ -518,13 +535,14 @@ impl JitEngine {
         map: &MemoryMap,
     ) -> CompiledBlock {
         if let Some(candidates) = self.translations.get(&(start_pc, stop_pc)) {
-            for (words, func) in candidates {
+            for (words, func, ends_open) in candidates {
                 if pram_matches(map, start_pc, words) {
                     self.stats.cache_hits += 1;
                     return CompiledBlock {
                         func: *func,
                         end_pc: start_pc + words.len() as u32,
                         generation,
+                        ends_open: *ends_open,
                     };
                 }
             }
@@ -542,7 +560,11 @@ impl JitEngine {
         self.translations
             .entry((start_pc, stop_pc))
             .or_default()
-            .push((block_words(map, start_pc, block.end_pc), block.func));
+            .push((
+                block_words(map, start_pc, block.end_pc),
+                block.func,
+                block.ends_open,
+            ));
         self.translation_count += 1;
         self.stats.retained = self.translation_count as u64;
         block
@@ -567,11 +589,12 @@ impl JitEngine {
             .push(AbiParam::new(types::I32));
 
         let end_pc;
+        let ends_open;
         {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
             emitter.set_loop_quantum(self.loop_quantum);
-            end_pc = emitter.emit_block(start_pc, self.max_block_len, stop_pc);
+            (end_pc, ends_open) = emitter.emit_block(start_pc, self.max_block_len, stop_pc);
             let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
             emitter.finalize_and_return(frontend_config);
         }
@@ -582,6 +605,7 @@ impl JitEngine {
             func,
             end_pc,
             generation,
+            ends_open,
         }
     }
 
@@ -776,6 +800,14 @@ impl DspState {
 
             let block = jit.cache.blocks[pc as usize].unwrap();
             jit.stats.block_entries += 1;
+            // Order matters: the REP and inlined-DO paths break at stop_pc
+            // without marking a terminator, so the boundary test has to run
+            // first or those land in the cap's bucket.
+            if block.end_pc == stop_pc {
+                jit.stats.block_ends_do_boundary += 1;
+            } else if block.ends_open {
+                jit.stats.block_ends_open += 1;
+            }
             let consumed = unsafe { (block.func)(self as *mut DspState) };
             self.exit_requested = false;
 

@@ -367,6 +367,11 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
         cache_hits,
         retained,
         block_entries,
+        // Diagnostics for the block profile's dump, not part of the C ABI.
+        // Named rather than elided so a new counter still has to be
+        // considered here.
+        block_ends_do_boundary: _,
+        block_ends_open: _,
     } = dsp.jit.stats;
     unsafe {
         *out = CJitStats {
