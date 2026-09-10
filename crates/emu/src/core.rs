@@ -830,6 +830,11 @@ impl DspState {
 
     // Address register update
 
+    /// Reverse the low 24 bits of a value (bit-reverse addressing domain).
+    fn bitrev24(v: u32) -> u32 {
+        v.reverse_bits() >> 8
+    }
+
     /// Update address register Rn based on M register mode.
     pub fn update_rn(&mut self, numreg: usize, modifier: i32) {
         let r_mask = REG_MASKS[reg::R0];
@@ -839,7 +844,23 @@ impl DspState {
             let value = (self.registers[reg::R0 + numreg] as i32).wrapping_add(modifier);
             self.registers[reg::R0 + numreg] = (value as u32) & r_mask;
         } else if m_reg == 0 {
-            self.update_rn_bitreverse(numreg);
+            // Bit-reverse mode: every update operates in the bit-reversed
+            // domain - r' = rev24(rev24(r) +- rev24(|modifier|)). One rule
+            // reproduces all silicon observations (probes):
+            // the +-1 plain updates (rev(1) = $800000 -> bit-0 toggle),
+            // N = 0 (no-op), power-of-2 +Nn walks, non-power-of-2 N, and
+            // the subtract direction (true reversed borrow, NOT the +Nn
+            // walk: -N=8 from $001234 gives $001238, -N=3 gives $001236).
+            let r_mask = REG_MASKS[reg::R0];
+            let r_val = self.registers[reg::R0 + numreg] & r_mask;
+            let rev_r = Self::bitrev24(r_val);
+            let rev_n = Self::bitrev24(modifier.unsigned_abs() & r_mask);
+            let rev_new = if modifier >= 0 {
+                rev_r.wrapping_add(rev_n)
+            } else {
+                rev_r.wrapping_sub(rev_n)
+            } & r_mask;
+            self.registers[reg::R0 + numreg] = Self::bitrev24(rev_new);
         } else if (m_reg & 0xC000) == 0x8000 {
             // Multiple wrap-around modulo: bit 15=1, bit 14=0.
             // Modulo M (power of 2) stored as M-1 in bits 13:0.
@@ -857,48 +878,6 @@ impl DspState {
             self.update_rn_modulo(numreg, modifier);
         }
         // else: reserved M register values, do nothing
-    }
-
-    /// Bit-reverse carry address update.
-    fn update_rn_bitreverse(&mut self, numreg: usize) {
-        let r_mask = REG_MASKS[reg::R0];
-        let n_val = self.registers[reg::N0 + numreg] & REG_MASKS[reg::N0];
-
-        // Count trailing zeros to determine number of bits to reverse.
-        // revbits = trailing_zeros(N) + 1, capped at 24 (full 24-bit reversal when N=0).
-        let revbits: u32 = if n_val == 0 {
-            24
-        } else {
-            n_val.trailing_zeros() + 1
-        }
-        .min(24);
-
-        let r_reg = self.registers[reg::R0 + numreg] & r_mask;
-
-        // Reverse lower revbits of Rn
-        let high_mask = r_mask.wrapping_shl(revbits) & r_mask;
-        let mut value = r_reg & high_mask;
-        for i in 0..revbits {
-            if r_reg & (1u32 << i) != 0 {
-                value |= 1u32 << (revbits - i - 1);
-            }
-        }
-
-        let revmask = 1u32.wrapping_shl(revbits).wrapping_sub(1);
-        value = (value + 1) & revmask;
-
-        // Combine with high bits of Rn
-        let r_new = (r_reg & high_mask) | value;
-
-        // Reverse back
-        let mut result = r_new & high_mask;
-        for i in 0..revbits {
-            if r_new & (1u32 << i) != 0 {
-                result |= 1u32 << (revbits - i - 1);
-            }
-        }
-
-        self.registers[reg::R0 + numreg] = result & r_mask;
     }
 
     /// Modulo address update.
@@ -1390,15 +1369,34 @@ mod tests {
         state.registers[reg::N0] = 8;
         state.registers[reg::R0] = 0;
 
-        // Step through the bit-reverse sequence
+        // Step through the bit-reverse sequence ((Rn)+Nn form: the
+        // modifier carries Nn; magnitude beyond +-1 selects the
+        // N-derived reverse-carry walk)
         let expected = [8, 4, 12, 2, 10, 6, 14, 1];
         for &exp in &expected {
-            state.update_rn(0, 1); // modifier is ignored for bit-reverse
+            state.update_rn(0, 8);
             assert_eq!(
                 state.registers[reg::R0],
                 exp,
                 "expected R0={exp} after bit-reverse step"
             );
+        }
+    }
+
+    #[test]
+    fn test_bitreverse_plain_toggles_bit0() {
+        // Silicon: plain (Rn)+ / (Rn)- in bit-reverse mode toggle bit 0,
+        // independent of N and direction (see ARCHITECTURE-NOTES.md).
+        let mut state = DspState::new(MemoryMap::default());
+        state.registers[reg::M0] = 0;
+        for n in [0u32, 1, 3, 8] {
+            state.registers[reg::N0] = n;
+            state.registers[reg::R0] = 0x001234;
+            state.update_rn(0, 1);
+            assert_eq!(state.registers[reg::R0], 0x001235, "inc, N={n}");
+            state.registers[reg::R0] = 0x000F0F;
+            state.update_rn(0, -1);
+            assert_eq!(state.registers[reg::R0], 0x000F0E, "dec, N={n}");
         }
     }
 
@@ -1413,7 +1411,7 @@ mod tests {
 
         let expected = [4, 2, 6, 1, 5, 3, 7, 0];
         for &exp in &expected {
-            state.update_rn(0, 1);
+            state.update_rn(0, 4);
             assert_eq!(state.registers[reg::R0], exp);
         }
     }

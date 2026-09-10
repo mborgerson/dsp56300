@@ -98,7 +98,7 @@ fn test_bitreverse_rn_update() {
     s.registers[reg::M0] = 0; // bit-reverse mode
     s.registers[reg::N0] = 8; // 4 bits to reverse (bit 3 is first set bit)
     s.registers[reg::R0] = 0;
-    s.update_rn(0, 0); // bit-reverse increment
+    s.update_rn(0, 8); // (Rn)+Nn form: modifier carries Nn
     // Starting from 0, bit-reverse increment should give 8 (0b1000 reversed in 4 bits)
     assert_eq!(s.registers[reg::R0], 8);
 }
@@ -117,7 +117,7 @@ fn test_bitreverse_nonzero_rn() {
     // increment: 4 + 1 = 5 = 0b101
     // reverse back: 101 -> 101 = 5
     s.registers[reg::R0] = 1;
-    s.update_rn(0, 0);
+    s.update_rn(0, 4); // (Rn)+Nn form: modifier carries Nn
     // Expected: reverse(001)=100, +1=101, reverse(101)=101 = 5
     assert_eq!(s.registers[reg::R0], 5);
 }
@@ -135,7 +135,7 @@ fn test_bitreverse_multi_step() {
     let expected = [0u32, 8, 4, 12, 2, 10, 6, 14];
     for (i, &exp) in expected.iter().enumerate() {
         assert_eq!(s.registers[reg::R0], exp, "step {i}: expected {exp}");
-        s.update_rn(0, 0);
+        s.update_rn(0, 8); // (Rn)+Nn form: modifier carries Nn
     }
 }
 
@@ -420,11 +420,11 @@ fn test_bitreverse_large_n() {
     s.registers[reg::M0] = 0; // bit-reverse mode
     s.registers[reg::N0] = 0x100; // 9 bits to reverse (bit 8 is highest set bit)
     s.registers[reg::R0] = 1; // 0b000000001 in 9-bit field
-    s.update_rn(0, 0);
+    s.update_rn(0, 0x100); // (Rn)+Nn form: modifier carries Nn
     // With N=0x100 (9-bit reversal field), R0=0:
     // reverse(0)=0, +N=0x100, reverse back -> 0x100.
     s.registers[reg::R0] = 0;
-    s.update_rn(0, 0);
+    s.update_rn(0, 0x100);
     assert_eq!(
         s.registers[reg::R0],
         0x100,
@@ -443,7 +443,7 @@ fn test_bitreverse_different_register() {
     s.registers[reg::M1] = 0; // bit-reverse mode for register set 1
     s.registers[reg::N1] = 8; // 4 bits to reverse
     s.registers[reg::R1] = 0;
-    s.update_rn(1, 0);
+    s.update_rn(1, 8); // (Rn)+Nn form: modifier carries Nn
     // Same as test_bitreverse_rn_update but on register set 1
     assert_eq!(
         s.registers[reg::R1],
@@ -503,8 +503,9 @@ fn test_bitreverse_n_zero() {
 fn test_bitreverse_jit_path() {
     // Bit-reverse addressing through JIT (emit_calc_ea). Use move x:(R0)+,X0 with M0=0.
     // Per DSP56300FM Section 4.5.2: M=0 enables bit-reverse mode.
-    // N0 determines the reversal field width. N0=8 -> 4-bit reversal.
-    // R0=0 -> after bit-reverse increment -> R0=8 (same as update_rn test).
+    // Silicon: the plain (Rn)+ update in bit-reverse mode toggles bit 0
+    // of Rn regardless of N (see ARCHITECTURE-NOTES.md); the N-derived
+    // reversal walk applies only to the (Rn)+Nn forms.
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -525,11 +526,11 @@ fn test_bitreverse_jit_path() {
         0x424242,
         "should read from X:0 (original R0)"
     );
-    // R0 should be bit-reverse updated: 0 -> 8
+    // R0 should toggle bit 0: 0 -> 1 (plain + in bit-reverse mode)
     assert_eq!(
         s.registers[reg::R0],
-        8,
-        "R0 should be bit-reverse incremented from 0 to 8 via JIT path"
+        1,
+        "R0 should toggle bit 0 (0 -> 1) via JIT path"
     );
 }
 
@@ -570,7 +571,7 @@ fn test_bitreverse_high_bits_preserved() {
     s.registers[reg::M0] = 0; // bit-reverse mode
     s.registers[reg::N0] = 8; // 4-bit reversal
     s.registers[reg::R0] = 0xFF0; // high bits set, low 4 bits = 0
-    s.update_rn(0, 0);
+    s.update_rn(0, 8); // (Rn)+Nn form: modifier carries Nn
     // Expected: low 4 bits go 0->8 (bit-reverse sequence), high bits preserved.
     assert_eq!(
         s.registers[reg::R0],
@@ -739,33 +740,30 @@ fn test_multi_wrap_modulo_rn_plus_nn_jit() {
 
 #[test]
 fn test_bitreverse_n_zero_exact_value() {
-    // Bit-reverse with N=0 should use full 24-bit reversal.
-    // When N=0, revbits=24. Starting from R0=0:
-    // 1. Reverse lower 24 bits of 0 -> 0
-    // 2. Add 1: (0+1) & 0xFFFFFF = 1
-    // 3. Combine with high bits: 0 | 1 = 1
-    // 4. Reverse back lower 24 bits of 1 -> 0x800000
+    // (Rn)+Nn with Nn = 0 in bit-reverse mode: MCPX silicon leaves Rn
+    // unchanged (probed via LUA - see ARCHITECTURE-NOTES.md), not a full
+    // 24-bit reversal.
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
     s.registers[reg::M0] = 0; // bit-reverse mode
-    s.registers[reg::N0] = 0; // N=0 -> full 24-bit reversal
+    s.registers[reg::N0] = 0;
     s.registers[reg::R0] = 0;
     s.update_rn(0, 0);
     assert_eq!(
         s.registers[reg::R0],
-        0x800000,
-        "bit-reverse N=0: from 0, full 24-bit reversal step should give 0x800000"
+        0,
+        "bit-reverse with Nn=0: Rn unchanged (silicon)"
     );
 
-    // Second step: from 0x800000
-    // reverse(0x800000, 24) = 0x000001, +1 = 0x000002, reverse(2, 24) = 0x400000
+    // Also unchanged from a nonzero starting point.
+    s.registers[reg::R0] = 0x800000;
     s.update_rn(0, 0);
     assert_eq!(
         s.registers[reg::R0],
-        0x400000,
-        "bit-reverse N=0: from 0x800000, next step should give 0x400000"
+        0x800000,
+        "bit-reverse with Nn=0: Rn unchanged from 0x800000 (silicon)"
     );
 }
 
