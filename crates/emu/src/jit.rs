@@ -621,6 +621,11 @@ impl DspState {
             self.cycle_count += consumed as u32;
             self.cycle_budget -= consumed;
 
+            // Sticky unimplemented-feature warnings: the single-step path
+            // checks in advance_pc, but compiled blocks bypass it, so a
+            // mode bit set inside a block would otherwise go unnoticed.
+            self.check_unimplemented_modes();
+
             // Only sequential fall-through from LA triggers the loop-back
             // (pc_advance != 0); a branch landing on LA+1 does not. Matches
             // hardware BRKcc, which jumps to LA+1 leaving the loop state live.
@@ -677,6 +682,23 @@ mod tests {
         assert!(jit.cache.blocks[0].is_some());
         assert_eq!(s.cycle_count, 12); // 3 blocks x 4 cycles
         assert_eq!(s.registers[reg::A0], 3);
+    }
+
+    #[test]
+    fn test_block_path_checks_unimplemented_modes() {
+        // The block run loop must notice unimplemented mode bits (sticky
+        // warnings) even though it bypasses advance_pc.
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        pram[0] = 0x000008; // inc A
+        pram[1] = 0x0C0000; // jmp $0
+        s.registers[reg::SR] |= 1 << 13; // SC (16-bit compatibility mode)
+        assert_eq!(s.warned_bits, 0);
+        s.run(&mut jit, 4); // one block, no interrupt/single-step fallback
+        assert_ne!(s.warned_bits, 0, "block path missed the mode check");
     }
 
     #[test]
