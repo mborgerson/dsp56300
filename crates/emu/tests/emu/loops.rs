@@ -3334,3 +3334,103 @@ fn test_straightline_skip_to_do_boundary_stays_split() {
     // The branch left mid-loop: LC must show one completed iteration.
     assert_eq!(stepped[reg::LC], 3, "expected exit on iteration 2 of 4");
 }
+
+#[test]
+fn test_huge_runtime_lc_preempts() {
+    // A register-count DO with a pathological 24-bit LC must preempt at
+    // the inline-loop quantum, not run 16M iterations inside one block
+    // call.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x06C400; // do x0,$0004
+    pram[1] = 0x000004;
+    pram[2] = 0x2000D0; // mpy +y0,x0,a
+    pram[3] = 0x200040; // add x0,a
+    pram[4] = 0x200044; // sub x0,a (LA)
+    pram[5] = 0x000086; // wait
+    s.registers[reg::X0] = 0xFFFFFF;
+    s.run(&mut jit, 100);
+    // The run must come back promptly with the budget spent; the block
+    // call itself must not have run millions of iterations.
+    assert!(
+        s.cycle_count < 3 * 4096 + 100,
+        "cycle_count={}",
+        s.cycle_count
+    );
+}
+
+#[test]
+fn test_huge_runtime_lc_nested_preempts() {
+    // Nested register-count DOs, both huge: the multiplicative case.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x06C400; // do x0,$0006
+    pram[1] = 0x000006;
+    pram[2] = 0x06C400; // do x0,$0005
+    pram[3] = 0x000005;
+    pram[4] = 0x2000D0; // mpy
+    pram[5] = 0x200040; // add (inner LA)
+    pram[6] = 0x200044; // sub (outer LA)
+    pram[7] = 0x000086; // wait
+    s.registers[reg::X0] = 0xFFFFFF;
+    s.run(&mut jit, 100);
+    assert!(
+        s.cycle_count < 3 * 4096 + 100,
+        "cycle_count={}",
+        s.cycle_count
+    );
+}
+
+#[test]
+fn test_wedge_case_2838_block_preempts() {
+    // A triple-nested DO (imm count wrapping two register-count loops
+    // sharing X0) with a forward Bcc skip in the innermost body, entered
+    // with X0=0x0cc581 - ~10^12 iterations if a block call ran the nest to
+    // completion. The production quantum must bail promptly.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    let words = [
+        0x060380, 0x00000d, // 0000: do #$0003,$000d
+        0xc4a842, // 0002: or x0,a x:(r0)+n0,x1 y:(r5),y0
+        0x06c400, 0x00000c, // 0003: do x0,$000c
+        0x06c400, 0x00000b, // 0005: do x0,$000b
+        0x6b84b1, // 0007: mpyr +y1,y0,a y:$0004,r3
+        0x0d1049, 0x000003, // 0008: blt >$000b
+        0x6b84b1, // 000a: mpyr +y1,y0,a y:$0004,r3
+        0x777fb1, // 000b: mpyr +y1,y0,a n7,x:-(r7)  (inner LA)
+        0x000000, // 000c: nop (mid LA)
+        0x000000, // 000d: nop (outer LA)
+        0x000086, // 000e: wait (park)
+    ];
+    for (i, w) in words.iter().enumerate() {
+        pram[i] = *w;
+    }
+    for i in 0..8 {
+        s.registers[reg::M0 + i] = 0xffffff;
+    }
+    s.registers[reg::SR] = 0; // the wedge entry had SR fully zeroed
+    s.registers[reg::LA] = 0x5c5800;
+    s.registers[reg::LC] = 0x000002;
+    s.registers[reg::X0] = 0x0cc581;
+    s.registers[reg::X1] = 0xd622d4;
+    s.registers[reg::Y0] = 0x20ecd6;
+    s.registers[reg::Y1] = 0x42a98f;
+    s.registers[reg::R7] = 0x00000c;
+    s.registers[reg::N0] = 0x000001;
+    s.run(&mut jit, 191);
+    // One quantum's worth of work at most, give or take a block tail.
+    assert!(
+        s.cycle_count < 3 * 4096 + 200,
+        "cycle_count={}",
+        s.cycle_count
+    );
+}
