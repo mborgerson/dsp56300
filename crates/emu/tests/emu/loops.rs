@@ -2723,6 +2723,83 @@ fn test_inline_loop_preemption_is_slice_independent() {
 }
 
 #[test]
+fn test_nested_do_sharing_an_la_is_not_inlined() {
+    // Two DO loops whose LA is the same address. Hardware ends only the
+    // innermost loop there, so the outer one gets its LA restored behind a PC
+    // that has already passed it and never terminates: LF stays set, its
+    // frame stays on the stack, and execution runs straight on past LA.
+    //
+    // The inlined loop shape cannot express that - the block's own
+    // end-of-loop handling fires at the same instruction as the inline
+    // loop's exit and pops twice - so `is_do_body_inlineable` refuses the
+    // shape and leaves it to the block-boundary path. Run it both ways and
+    // against the instruction-at-a-time path; all three must agree.
+    fn program(pram: &mut [u32]) {
+        pram[0] = 0x060180; // do #1,$0004
+        pram[1] = 0x000004;
+        pram[2] = 0x060280; // do #2,$0004   (same LA)
+        pram[3] = 0x000004;
+        pram[0x16] = 0x0C0016; // jmp $0016 (park)
+    }
+
+    fn state_of(s: &DspState) -> Vec<u32> {
+        let mut v = vec![s.pc, s.cycle_count];
+        v.extend_from_slice(&s.registers);
+        v
+    }
+
+    fn blocks(slice: i32) -> Vec<u32> {
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        program(&mut pram);
+        let mut given = 0;
+        while given < 20 {
+            let step = slice.min(20 - given);
+            given += step;
+            s.run(&mut jit, step);
+        }
+        state_of(&s)
+    }
+
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    program(&mut pram);
+    while s.cycle_count < 20 {
+        run_one(&mut s, &mut jit);
+    }
+    let stepped = state_of(&s);
+
+    // The inner loop ran twice and popped once; the outer loop is still live
+    // with its own LA and LC, and the PC has left it behind.
+    assert_ne!(
+        stepped[2 + reg::SR] & (1 << sr::LF),
+        0,
+        "outer loop still live"
+    );
+    assert_eq!(stepped[2 + reg::SP], 2, "only the inner frame was popped");
+    assert_eq!(stepped[2 + reg::LA], 0x0004);
+    assert_eq!(stepped[2 + reg::LC], 1);
+    assert!(stepped[0] > 0x0004, "execution ran past the shared LA");
+
+    assert_eq!(
+        blocks(20),
+        stepped,
+        "block path diverged from single-stepping"
+    );
+    assert_eq!(
+        blocks(1),
+        stepped,
+        "sliced block path diverged from single-stepping"
+    );
+}
+
+#[test]
 fn test_out_of_range_extension_byte_does_not_leak_into_carry() {
     // A2/B2 are 8 bits. An embedder that pokes a wider value into
     // DspState::registers must not have it packed into bits 56+ of the
