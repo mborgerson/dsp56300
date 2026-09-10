@@ -1010,6 +1010,8 @@ pub unsafe extern "C" fn jit_read_ssh(state: *mut DspState) -> u32 {
 /// Write SSH in place: modify the top stack slot without touching SP.
 /// Used by the bit-modifying ops (BSET/BCLR/BCHG on SSH), which
 /// hardware-verifiably rewrite the top entry rather than pushing.
+/// At sp=0 silicon wedges on these ops (probe); we keep
+/// the historical skip-slot-0 behavior and continue benignly.
 ///
 /// # Safety
 /// `state` must be a valid pointer to a `DspState`.
@@ -1029,11 +1031,11 @@ pub unsafe extern "C" fn jit_write_ssh_tos(state: *mut DspState, value: u32) {
 pub unsafe extern "C" fn jit_write_ssl(state: *mut DspState, value: u32) {
     let state = unsafe { &mut *state };
     let idx = (state.registers[reg::SP] & 0xF) as usize;
-    let value = if idx == 0 {
-        0
-    } else {
-        value & REG_MASKS[reg::SSL]
-    };
+    // Slot 0 is real storage on silicon: an SSL write at sp=0 (movec or
+    // bit op) persists in the slot and reads back after SP round-trips
+    // (hardware-verified, probe_ssl_movec_write_sp0 /
+    // probe_ssl_bset_sp0). No zero-forcing.
+    let value = value & REG_MASKS[reg::SSL];
     state.stack[1][idx] = value;
     state.registers[reg::SSL] = value;
 }
