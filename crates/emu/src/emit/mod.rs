@@ -1435,6 +1435,14 @@ impl<'a> Emitter<'a> {
                 // set_halt_requested) when it needs the block to return
                 // to the run loop.
                 if check_exit && !is_terminator {
+                    // Materialize pending CCR before the branch: the
+                    // early-return arm calls flush_all_to_memory but never
+                    // flush_pending_flags, so a preceding instruction's
+                    // deferred flag computation would be dropped on exit
+                    // (the continue-path flush in finalize_and_return never
+                    // runs). Flushing pre-brif is safe - the SSA values
+                    // dominate both paths.
+                    self.flush_pending_flags();
                     // Flush accumulated cycles BEFORE the branch so both
                     // the early-return and continue paths see the correct
                     // total_cycles in Cranelift. (pending_cycles is a Rust
