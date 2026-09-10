@@ -1278,11 +1278,12 @@ fn test_bclr_ssh_in_place() {
 }
 
 #[test]
-fn test_bset_full_accum_b_no_limiting() {
-    // BSET on full accumulator B (DDDDDD=0x0F). The manual p.13-34 mentions
-    // accumulator scaling/limiting for full A/B, but the emitter deliberately
-    // uses load_reg/store_reg (no limiting) for bit ops. This test locks in
-    // that behavior: the operation hits register slot 0x0F directly.
+fn test_bset_full_accum_b_limits() {
+    // BSET on full accumulator B (DDDDDD=0x0F). Silicon-verified
+    // (bank b12 bitops_full_acc): full-accumulator bit ops
+    // go through the MOVE path - limited (scaled) 24-bit read, RMW on
+    // the limited value, sign-extended write-back that clears B0, with
+    // L set by the limiting read.
     // BSET reg template: 0000101011DDDDDD011bbbbb
     // DDDDDD=001111 (B=0x0F), bbbbb=00000 (bit 0)
     // 0000_1010_1100_1111_0110_0000 = 0x0ACF60
@@ -1291,17 +1292,16 @@ fn test_bset_full_accum_b_no_limiting() {
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-    // Set B sub-registers to a value with extension in use
+    // B = $FF:800000:000000 with scale-up: the scaled read limits to the
+    // negative rail $800000; bset #0 -> $800001; write-back sign-extends.
     s.registers[reg::B2] = 0xFF;
     s.registers[reg::B1] = 0x800000;
     s.registers[reg::B0] = 0x000000;
-    // Set scale-up mode
     s.registers[reg::SR] = 1 << sr::S1;
     pram[0] = 0x0ACF60; // bset #0,B (full accumulator, slot 0x0F)
     run_one(&mut s, &mut jit);
-    // Bit op hits register slot 0x0F directly, not the packed accumulator.
-    // B2/B1/B0 sub-registers should be unchanged (bit op doesn't touch them).
-    assert_eq!(s.registers[reg::B2], 0xFF, "B2 unchanged");
-    assert_eq!(s.registers[reg::B1], 0x800000, "B1 unchanged");
-    assert_eq!(s.registers[reg::B0], 0x000000, "B0 unchanged");
+    assert_eq!(s.registers[reg::B2], 0xFF, "B2 = sign extension");
+    assert_eq!(s.registers[reg::B1], 0x800001, "B1 = limited RMW result");
+    assert_eq!(s.registers[reg::B0], 0x000000, "B0 cleared by write-back");
+    assert_ne!(s.registers[reg::SR] & (1 << sr::L), 0, "L from limiting");
 }
