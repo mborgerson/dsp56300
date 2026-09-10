@@ -134,6 +134,21 @@ fn gen_case(rng: &mut Rng) -> Case {
             rng.n(0x1000000)
         };
     }
+    // Straight-line forward-skip clusters (the emit_block if-conversion):
+    // the same op set as gen_body's in-loop skips, planted in the tail
+    // the loop falls into. The region words stay whatever the random
+    // fill put there, so misaligned merges and nested/rejected shapes
+    // all occur.
+    for _ in 0..1 + rng.n(3) {
+        let at = la + 2 + rng.n((PRAM - la - 8) as u32) as usize;
+        let op = match rng.n(3) {
+            0 => 0x0CC581, // brclr #1,x1,<fwd>
+            1 => 0x0CC6A0, // brset #0,y0,<fwd>
+            _ => 0x0D1049, // blt <fwd>
+        };
+        p[at] = op;
+        p[at + 1] = 2 + rng.n(3);
+    }
     let x: Vec<u32> = (0..XRAM).map(|_| rng.n(0x1000000)).collect();
     let y: Vec<u32> = (0..YRAM).map(|_| rng.n(0x1000000)).collect();
 

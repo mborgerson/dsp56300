@@ -3096,3 +3096,241 @@ fn test_mixing_nest_inlines_with_skips() {
         "nest did not inline: {entries} block entries for 2x32 iterations"
     );
 }
+
+// Forward-skip if-conversion in straight-line code (shape B): the same
+// brclr shape that would split DO bodies also splits non-loop blocks, and
+// emit_block compiles it as a structured conditional skip instead of a
+// block terminator. Each shape runs the block path against execute_one as
+// the oracle.
+
+fn straightline_arms(code: &[u32]) -> ([u32; 64], [u32; 64]) {
+    let run_arm = |mode: u8| -> [u32; 64] {
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        for (i, &w) in code.iter().enumerate() {
+            pram[i] = w;
+        }
+        pram[code.len()] = 0x000086; // wait (park)
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        s.registers[reg::SR] = 0xC0_0300;
+        s.registers[reg::X0] = 0x000002;
+        s.registers[reg::Y0] = 0x000003;
+        s.registers[reg::A1] = 0x000006;
+        s.registers[reg::B1] = 0x123456;
+        let mut guard = 0;
+        while s.power_state == PowerState::Normal {
+            if mode == 0 {
+                s.execute_one(&mut jit);
+            } else {
+                s.run(&mut jit, 10_000);
+            }
+            guard += 1;
+            assert!(guard < 10_000, "did not reach the park");
+        }
+        s.registers
+    };
+    (run_arm(0), run_arm(1))
+}
+
+fn assert_straightline_arms_agree(code: &[u32], what: &str) {
+    let (stepped, inlined) = straightline_arms(code);
+    for r in [
+        reg::SR,
+        reg::A1,
+        reg::A0,
+        reg::A2,
+        reg::B1,
+        reg::X0,
+        reg::X1,
+        reg::R0,
+    ] {
+        assert_eq!(
+            stepped[r], inlined[r],
+            "{what}: reg[{r:#04x}] step={:#08x} inline={:#08x}",
+            stepped[r], inlined[r]
+        );
+    }
+}
+
+#[test]
+fn test_straightline_forward_skip_taken() {
+    // x1 stays 0, so brclr #1,x1 skips the add.
+    assert_straightline_arms_agree(
+        &[
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC581, 0x000003, // brclr #1,x1,+3 -> skips add
+            0x200040, // add x0,a       (skipped)
+            0x200044, // sub x0,a       (merge)
+        ],
+        "mpy;brclr(taken);add;sub",
+    );
+}
+
+#[test]
+fn test_straightline_forward_skip_never_taken() {
+    assert_straightline_arms_agree(
+        &[
+            0x0AC561, // bset #1,x1
+            0x2000D0, // mpy +y0,x0,a
+            0x0CC581, 0x000003, // brclr #1,x1,+3
+            0x200040, // add x0,a       (runs)
+            0x200044, // sub x0,a
+        ],
+        "bset;mpy;brclr(never);add;sub",
+    );
+}
+
+#[test]
+fn test_straightline_forward_skips_nested() {
+    // Outer skip taken (x1 seeds 0) and, with bset first, outer falls
+    // through into a region whose inner brset #0,y0 is taken (Y0=3).
+    let nest = [
+        0x0CC581, 0x000007, // brclr #1,x1,+7 -> outer skip to merge
+        0x2000D0, // mpy +y0,x0,a
+        0x0CC6A0, 0x000003, // brset #0,y0,+3 -> inner skip
+        0x200040, // add x0,a       (inner arm)
+        0x200044, // sub x0,a       (inner merge)
+        0x218D00, // move a1,b1     (outer merge)
+    ];
+    assert_straightline_arms_agree(&nest, "nested skips, outer taken");
+    let mut armed = vec![0x0AC561]; // bset #1,x1
+    armed.extend_from_slice(&nest);
+    assert_straightline_arms_agree(&armed, "nested skips, outer falls through");
+}
+
+#[test]
+fn test_straightline_bcc_forward_skip() {
+    // cmp materializes the flags, blt reads them (a dominated SR read).
+    assert_straightline_arms_agree(
+        &[
+            0x200045, // cmp x0,a
+            0x0D1049, 0x000003, // blt +3 -> skips sub when a >= x0
+            0x200044, // sub x0,a
+            0x200040, // add x0,a
+        ],
+        "cmp;blt;sub;add",
+    );
+}
+
+#[test]
+fn test_straightline_skip_arm_reads_memory() {
+    let body = [
+        0x2000D0, // mpy +y0,x0,a
+        0x0CC581, 0x000004, // brclr #1,x1,+4
+        0x44E000, // move x:(r0),x0 (arm)
+        0x200040, // add x0,a       (arm)
+        0x200044, // sub x0,a       (merge)
+    ];
+    assert_straightline_arms_agree(&body, "skip arm with memory read, taken");
+    let mut armed = vec![0x0AC561]; // bset #1,x1
+    armed.extend_from_slice(&body);
+    assert_straightline_arms_agree(&armed, "skip arm with memory read, runs");
+}
+
+#[test]
+fn test_straightline_skip_misaligned_target_stays_split() {
+    // The taken target lands on the immediate word of a two-word move:
+    // the region scan must reject it (terminator form), and all arms
+    // still agree - both paths decode the same words at the same PCs.
+    let body = [
+        0x0CC581, 0x000003, // brclr #1,x1,+3 -> mid-instruction target
+        0x44F400, 0x200044, // move #>$200044,x0 (immediate word = target)
+    ];
+    assert_straightline_arms_agree(&body, "misaligned target, taken");
+    let mut armed = vec![0x0AC561]; // bset #1,x1
+    armed.extend_from_slice(&body);
+    assert_straightline_arms_agree(&armed, "misaligned target, falls through");
+}
+
+#[test]
+fn test_straightline_skip_inlines_in_situ() {
+    // Prove the transform fired: the whole sequence must compile as one
+    // block, where a terminator at the brclr would dispatch at least twice.
+    let words = [
+        0x2000D0, // mpy +y0,x0,a
+        0x0CC581, 0x000003, // brclr #1,x1,+3
+        0x200040, // add x0,a
+        0x200044, // sub x0,a
+        0x000086, // wait (park)
+    ];
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    for (i, w) in words.iter().enumerate() {
+        pram[i] = *w;
+    }
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    let mut guard = 0;
+    while s.power_state == PowerState::Normal {
+        s.run(&mut jit, 10_000);
+        guard += 1;
+        assert!(guard < 100, "did not reach the park");
+    }
+    let inlined = jit.stats.block_entries;
+    assert!(
+        inlined <= 1,
+        "straight-line skip did not compile as one block: {inlined} entries"
+    );
+}
+
+#[test]
+fn test_straightline_skip_to_do_boundary_stays_split() {
+    // A brclr inside a non-inlined DO body whose taken target is exactly
+    // LA+1. The scan must reject it: a taken branch to LA+1 is a BRANCH
+    // arrival (no loop-back on hardware), but an inlined skip would fall
+    // out of the block sequentially and trigger the run loop's loop-back.
+    // bchg alternates the predicate: iteration 1 falls through and loops
+    // back, iteration 2 branches out with the loop frame still active.
+    let words = [
+        0x060480, 0x000006, // 0000: do #4,$0006 (LA=6)
+        0x0BC541, // 0002: bchg #1,x1
+        0x0CC581, 0x000004, // 0003: brclr #1,x1,$0007 (= LA+1)
+        0x2000D0, // 0005: mpy +y0,x0,a
+        0x200040, // 0006: add x0,a  (LA)
+        0x000086, // 0007: wait (park)
+    ];
+    let arm = |step: bool| -> [u32; 64] {
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        for (i, w) in words.iter().enumerate() {
+            pram[i] = *w;
+        }
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        s.registers[reg::X0] = 0x000002;
+        s.registers[reg::Y0] = 0x000003;
+        let mut guard = 0;
+        while s.power_state == PowerState::Normal {
+            if step {
+                s.execute_one(&mut jit);
+            } else {
+                s.run(&mut jit, 10_000);
+            }
+            guard += 1;
+            assert!(guard < 1000, "did not reach the park");
+        }
+        s.registers
+    };
+    let (stepped, blocked) = (arm(true), arm(false));
+    for r in [
+        reg::SR,
+        reg::A1,
+        reg::A0,
+        reg::A2,
+        reg::X1,
+        reg::LC,
+        reg::LA,
+    ] {
+        assert_eq!(
+            stepped[r], blocked[r],
+            "reg[{r:#04x}] step={:#08x} block={:#08x}",
+            stepped[r], blocked[r]
+        );
+    }
+    // The branch left mid-loop: LC must show one completed iteration.
+    assert_eq!(stepped[reg::LC], 3, "expected exit on iteration 2 of 4");
+}

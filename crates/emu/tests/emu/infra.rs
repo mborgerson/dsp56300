@@ -3049,3 +3049,65 @@ fn test_illegal_long_interrupt_sets_i1i0_to_3() {
         "ILLEGAL long interrupt: I1:I0 should be raised to 3"
     );
 }
+
+#[test]
+fn test_block_exit_requested_inside_skip_arm() {
+    // A halting peripheral write inside a straight-line forward-skip
+    // arm. When the arm executes, the exit
+    // check inside it must early-return with the correct PC and cycle
+    // count; when the skip is taken, the write never runs and the block
+    // falls through to the park.
+    let run = |x1: u32, step: bool| -> (u32, u32, bool, PowerState) {
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        let state_ptr = &mut s as *mut DspState;
+        s.map.x_regions.push(MemoryRegion {
+            start: PERIPH_BASE,
+            end: PERIPH_BASE + PERIPH_SIZE as u32,
+            kind: RegionKind::Callback {
+                opaque: state_ptr as *mut std::ffi::c_void,
+                read_fn: cb_read_zero,
+                write_fn: cb_set_halt,
+            },
+        });
+        pram[0] = 0x0CC581; // brclr #1,x1,$0003 (5 cycles)
+        pram[1] = 0x000003;
+        pram[2] = 0x08C400; // MOVEP X0,x:$FFFFC0 (1 cycle, write halts)
+        pram[3] = 0x000086; // wait (park)
+        s.registers[reg::X1] = x1;
+        if step {
+            let mut guard = 0;
+            while s.power_state == PowerState::Normal && !s.halt_requested {
+                s.execute_one(&mut jit);
+                guard += 1;
+                assert!(guard < 100, "step arm did not park");
+            }
+        } else {
+            s.run(&mut jit, 10_000);
+        }
+        (s.pc, s.cycle_count, s.halt_requested, s.power_state)
+    };
+
+    // Bit 1 set: the arm executes, the callback halts the block at the
+    // exit check. brclr(5) + movep(1) = 6 cycles, PC after the movep.
+    let (pc, cycles, halted, power) = run(2, false);
+    assert_eq!(pc, 3);
+    assert_eq!(cycles, 6);
+    assert!(halted);
+    assert_eq!(power, PowerState::Normal);
+
+    // Bit 1 clear: the skip is taken, the write never runs, and the
+    // block falls through to the wait; cycles match step mode.
+    let (_, cycles, halted, power) = run(0, false);
+    assert!(!halted);
+    assert_ne!(power, PowerState::Normal);
+    let (_, step_cycles, step_halted, _) = run(0, true);
+    assert!(!step_halted);
+    assert_eq!(
+        cycles, step_cycles,
+        "skip-path cycles diverge from step mode"
+    );
+}
