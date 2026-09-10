@@ -7,6 +7,13 @@ below are stored in registers but do not affect execution behavior.
 
 ## 1. Unimplemented SR Mode Bits
 
+SA, SC, and DM are silicon-characterized and **deliberately
+deferred**, not TODO: they are DSP56000-compat shims / a DMAC-superseded
+multiply mode with no observed use in the workloads tested. The sticky runtime
+warnings (`check_unimplemented_modes`) will surface any program that
+exercises them; the characterization in ARCHITECTURE-NOTES makes them
+implementable on demand.
+
 ### 1.1 Sixteen-Bit Arithmetic Mode -- SR bit 17 (SA)
 
 When SA=1, the data path switches to 16-bit operation: operand widths become
@@ -15,6 +22,9 @@ rounding and limiting positions shift, and instructions like MERGE/EXTRACT/INSER
 operate on different bit fields.
 
 **Status:** Stored but never read. All arithmetic uses 24-bit data paths.
+Silicon-characterized (probe_sa): manual-accurate except bus
+reads zero bits 23-16 where the manual claims sign extension. See
+ARCHITECTURE-NOTES "Arithmetic Mode Bits".
 
 ### 1.2 Sixteen-Bit Compatibility Mode -- SR bit 13 (SC)
 
@@ -24,6 +34,10 @@ register sign bit moves from bit 23 to bit 15. Loop count zero causes the loop
 to execute 2^16 times (instead of 2^24).
 
 **Status:** Setting SC=1 prints a warning but does not change behavior.
+Silicon-characterized (probe_sc): all probed behavior matches
+the manual (write-clears-register vs read-clears-bus, address-calc MSB
+clearing, PCU move clearing). See ARCHITECTURE-NOTES "Arithmetic Mode
+Bits".
 
 ### 1.3 Double-Precision Multiply Mode -- SR bit 14 (DM)
 
@@ -31,7 +45,11 @@ When DM=1, four specific MPY/MAC register combinations implement a 48x48->96-bit
 double-precision multiply. The DSP56300 manual recommends using DMAC instead.
 
 **Status:** Stored but never read. Affected operations always execute in
-single-precision mode.
+single-precision mode. Silicon-characterized (probe_dm): the
+four-op algorithm semantics are exactly pinned (uu/su/us/ss signedness
+per stage, built-in 24-bit arithmetic right shift on stages 2 and 4;
+verified against the true 96-bit product), so DM is now implementable.
+See ARCHITECTURE-NOTES "Arithmetic Mode Bits".
 
 ### 1.4 Cache Enable -- SR bit 19 (CE)
 
@@ -98,6 +116,25 @@ RESET should reset all on-chip peripherals. Treated as a 7-cycle NOP.
 
 Both set a power_state flag that stops the run loop. The distinction between
 STOP (full clock halt) and WAIT (peripherals continue) is not modeled.
+
+### 3.6 Interrupt and Exception Delivery
+
+Core-fault delivery is modeled with hardware-verified timing across all
+probed classes: stack errors use per-class fetch-stream word budgets
+(non-branching, branch-class JSR overflow / RTS-RTI underflow, SE-bit SP
+writes), ILLEGAL and TRAP/TRAPcc vectors are silicon-pinned (budget 0,
+RTI skips the faulting op), and faults nested inside another fault's
+window truncate that window and deliver parked. See ARCHITECTURE-NOTES
+"Stack-Error Exception Delivery", "Core-Fault Map: ILLEGAL, TRAP,
+DO/ENDDO, Fast Vectors", and "Nested Core Faults". Remaining gaps:
+
+- A fault raised inside an inline-compiled REP/DO body does not split
+  its basic block, so block-mode delivery timing there can trail the
+  hardware model (corpus authoring keeps fault shapes out of loop
+  bodies).
+- Peripheral interrupt sources, priority arbitration beyond the IPL
+  compare, and fast-vector (non-JSR) stack-error shapes are
+  unverified against hardware.
 
 ---
 
