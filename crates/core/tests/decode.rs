@@ -1562,6 +1562,25 @@ fn test_decode_lua() {
 }
 
 #[test]
+fn test_decode_lua_data_reg_dest() {
+    // ddddd is the full 5-bit register index: $04 = x0 (not r4).
+    let opc = make_opcode(
+        "00000100010MMRRR000ddddd",
+        &[(b'M', 1), (b'R', 0), (b'd', 0x04)],
+    );
+    match decode(opc) {
+        Instruction::Lua { dst_reg, .. } => assert_eq!(dst_reg, 0x04),
+        other => panic!("expected Lua, got {other:?}"),
+    }
+    // ddddd $00-$03 name no register: Unknown.
+    let opc = make_opcode(
+        "00000100010MMRRR000ddddd",
+        &[(b'M', 1), (b'R', 0), (b'd', 0x02)],
+    );
+    assert!(matches!(decode(opc), Instruction::Unknown { .. }));
+}
+
+#[test]
 fn test_decode_lua_rel() {
     // lua (R2 + aa), N5 -> dest_is_n=true, dst_reg low 3 bits = 5
     let opc = make_opcode(
