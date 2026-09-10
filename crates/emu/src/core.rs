@@ -1021,6 +1021,21 @@ pub unsafe extern "C" fn jit_read_ssh(state: *mut DspState) -> u32 {
     ssh
 }
 
+/// Write SSH in place: modify the top stack slot without touching SP.
+/// Used by the bit-modifying ops (BSET/BCLR/BCHG on SSH), which
+/// hardware-verifiably rewrite the top entry rather than pushing.
+///
+/// # Safety
+/// `state` must be a valid pointer to a `DspState`.
+pub unsafe extern "C" fn jit_write_ssh_tos(state: *mut DspState, value: u32) {
+    let state = unsafe { &mut *state };
+    let idx = (state.registers[reg::SP] & 0xF) as usize;
+    if idx != 0 {
+        state.stack[0][idx] = value & REG_MASKS[reg::SSH];
+    }
+    state.registers[reg::SSH] = state.stack[0][idx];
+}
+
 /// Write to SSL register: update stack\[1\]\[SP\].
 ///
 /// # Safety

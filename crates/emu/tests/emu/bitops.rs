@@ -1124,8 +1124,9 @@ fn test_bclr_sr_mr_bit_s0() {
 }
 
 #[test]
-fn test_bset_ssh_does_not_pop() {
-    // BSET on SSH should NOT pop/push the stack.
+fn test_bset_ssh_in_place() {
+    // BSET on SSH does not change SP; it rewrites the top stack slot in
+    // place (hardware-verified).
     // BSET reg template: 0000101011DDDDDD011bbbbb
     // DDDDDD=111100 (SSH=0x3C), bbbbb=00000 (bit 0)
     // 0000_1010_1111_1100_0110_0000 = 0x0AFC60
@@ -1141,11 +1142,17 @@ fn test_bset_ssh_does_not_pop() {
     run_one(&mut s, &mut jit);
     let sp_after = s.registers[reg::SP] & 0xF;
     assert_eq!(sp_after, sp_before, "BSET on SSH should not change SP");
+    assert_eq!(s.stack[0][1], 0x101, "top stack slot modified in place");
+    assert_eq!(s.registers[reg::SSH], 0x101, "SSH mirror follows the slot");
+    let c = (s.registers[reg::SR] >> sr::C) & 1;
+    assert_eq!(c, 0, "C reflects the old bit 0 (was 0)");
 }
 
 #[test]
-fn test_bchg_ssh_does_not_pop() {
-    // BCHG on SSH should NOT pop/push the stack.
+fn test_bchg_ssh_in_place() {
+    // BCHG on SSH does not change SP; it rewrites the top stack slot in
+    // place (hardware-verified: a later pop returns the
+    // toggled value).
     // BCHG reg template: 0000101111DDDDDD010bbbbb
     // DDDDDD=111100 (SSH=0x3C), bbbbb=00000 (bit 0)
     // 0000_1011_1111_1100_0100_0000 = 0x0BFC40
@@ -1160,6 +1167,8 @@ fn test_bchg_ssh_does_not_pop() {
     run_one(&mut s, &mut jit);
     let sp_after = s.registers[reg::SP] & 0xF;
     assert_eq!(sp_after, sp_before, "BCHG on SSH should not change SP");
+    assert_eq!(s.stack[0][1], 0x101, "top stack slot toggled in place");
+    assert_eq!(s.registers[reg::SSH], 0x101, "SSH mirror follows the slot");
 }
 
 #[test]
@@ -1217,10 +1226,10 @@ fn test_bset_accum_scaling_mode() {
 }
 
 #[test]
-fn test_btst_ssh_does_not_pop() {
-    // BTST on SSH should not pop (per ARCHITECTURE-NOTES.md).
-    // Manual p.13-40 says "For destination operand SSH:SP, decrement the SP by 1"
-    // but our implementation (and BSET/BCHG tests) confirm no pop for pure bit ops.
+fn test_btst_ssh_pops() {
+    // BTST on SSH pops the stack, like a move-source read
+    // (hardware-verified; matches the manual's p.13-40
+    // "decrement the SP by 1" note).
     // BTST reg template: 0000101111DDDDDD0110bbbb (note: 5-bit bbbbb per errata)
     // DDDDDD=111100 (SSH=0x3C), bbbbb=00000 (bit 0)
     // 0000_1011_1111_1100_0110_0000 = 0x0BFC60
@@ -1230,21 +1239,21 @@ fn test_btst_ssh_does_not_pop() {
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
     s.stack_push(0x100, 0x200); // SP=1
-    s.stack_push(0x300, 0x400); // SP=2
-    let sp_before = s.registers[reg::SP] & 0xF;
-    assert_eq!(sp_before, 2);
+    s.stack_push(0x301, 0x400); // SP=2
     pram[0] = 0x0BFC60; // btst #0,SSH
     run_one(&mut s, &mut jit);
     let sp_after = s.registers[reg::SP] & 0xF;
-    assert_eq!(sp_after, sp_before, "BTST on SSH should not pop the stack");
-    // Verify C reflects the tested bit (SSH = 0x300, bit 0 = 0)
+    assert_eq!(sp_after, 1, "BTST on SSH pops the stack");
+    // C reflects bit 0 of the popped value (0x301 -> 1).
     let c = (s.registers[reg::SR] >> sr::C) & 1;
-    assert_eq!(c, 0, "C should reflect bit 0 of SSH (0x300 has bit 0 = 0)");
+    assert_eq!(c, 1, "C reflects bit 0 of the popped SSH value");
+    assert_eq!(s.registers[reg::SSH], 0x100, "SSH mirror is the new top");
 }
 
 #[test]
-fn test_bclr_ssh_does_not_pop() {
-    // BCLR on SSH should NOT pop/push the stack.
+fn test_bclr_ssh_in_place() {
+    // BCLR on SSH does not change SP; it rewrites the top stack slot in
+    // place (hardware-verified).
     // BCLR reg template: 0000101011DDDDDD010bbbbb
     // DDDDDD=111100 (SSH=0x3C), bbbbb=00000 (bit 0)
     // 0000_1010_1111_1100_0100_0000 = 0x0AFC40
@@ -1264,8 +1273,8 @@ fn test_bclr_ssh_does_not_pop() {
     // C should reflect the old bit 0 of SSH (was 1)
     let c = (s.registers[reg::SR] >> sr::C) & 1;
     assert_eq!(c, 1, "C should be 1 (old bit 0 of SSH was set)");
-    // SSH bit 0 should now be cleared
-    assert_eq!(s.registers[reg::SSH] & 1, 0, "SSH bit 0 should be cleared");
+    assert_eq!(s.stack[0][2], 0x302, "top stack slot modified in place");
+    assert_eq!(s.registers[reg::SSH], 0x302, "SSH mirror follows the slot");
 }
 
 #[test]
