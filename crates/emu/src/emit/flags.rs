@@ -11,6 +11,17 @@ impl<'a> Emitter<'a> {
         // add;or would drop the add's E/U/C/L, and even add;add drops the
         // first add's sticky L.
         self.flush_pending_flags();
+        // Snapshot the SM saturation marker for the kinds that consume it,
+        // and reset the variable. The marker belongs to THIS instruction —
+        // `emit_saturate_sm` runs before the flag kind is declared — so
+        // capturing it here decouples it from the variable, and the next
+        // instruction's `emit_saturate_sm` is then free to redefine the
+        // variable without first forcing this computation to materialize.
+        if flags.consumes_sm_marker() {
+            self.pending_sm_marker = Some(self.builder.use_var(self.sm_needs_sat_var));
+            let zero = self.builder.ins().iconst(types::I32, 0);
+            self.builder.def_var(self.sm_needs_sat_var, zero);
+        }
         self.pending_flags = Some(flags);
     }
 
@@ -280,6 +291,15 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_saturate_sm(&mut self, result: Value) -> Value {
         use crate::core::jit_saturate_sm;
 
+        // A pending CCR computation is deliberately NOT materialized here.
+        // `set_pending` snapshots the SM marker when it records an *Sm
+        // kind, so redefining sm_needs_sat_var below cannot strand one:
+        // without the snapshot a pending *Sm kind would flush later with
+        // THIS instruction's needs_sat and lose the earlier saturation's
+        // sticky L/V (two back-to-back SM adds where only the first
+        // saturates, with no SR read in between). Nothing else here needs
+        // the CCR: the helper reads SR for SM alone, and no pending
+        // computation writes SM.
         // Flush SR so the helper can read SM. Don't invalidate — SM doesn't change.
         self.flush_reg(reg::SR);
         self.promoted.dirty[reg::SR] = false;
@@ -328,7 +348,21 @@ impl<'a> Emitter<'a> {
     /// Apply deferred V/L flags from a previous `emit_saturate_sm` call.
     /// Call AFTER the instruction's normal flag computation (update_nz, update_vcl, etc.).
     pub(super) fn emit_sm_vl_deferred(&mut self) {
-        let needs_sat = self.builder.use_var(self.sm_needs_sat_var);
+        // The marker was snapshotted (and the variable re-zeroed) when the
+        // pending kind was recorded. Several kinds carry the SM term but
+        // belong to ops that never saturate (cmp is AluAddSub), and inside
+        // a multi-instruction block the variable is not re-zeroed per
+        // instruction otherwise - a stale needs_sat would OR V/L into the
+        // next flag flush.
+        //
+        // `set_pending` is the only place a pending kind is recorded, and
+        // it snapshots for exactly the kinds that reach here, so the
+        // fallback is unreachable; it reads the variable rather than
+        // panicking.
+        let needs_sat = match self.pending_sm_marker.take() {
+            Some(v) => v,
+            None => self.builder.use_var(self.sm_needs_sat_var),
+        };
         let sr = self.load_reg(reg::SR);
         let sr = self.or_vl(sr, needs_sat);
         self.store_reg(reg::SR, sr);
