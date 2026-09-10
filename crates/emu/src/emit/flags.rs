@@ -10,7 +10,15 @@ impl<'a> Emitter<'a> {
         // without materializing loses the earlier op's contributions — e.g.
         // add;or would drop the add's E/U/C/L, and even add;add drops the
         // first add's sticky L.
-        self.flush_pending_flags();
+        //
+        // The E/U/N/Z quarter is the exception. Reaching here means nothing
+        // read SR since the outgoing computation was recorded (`load_reg`
+        // flushes), so if the incoming kind rewrites all four — every kind
+        // that goes through `update_nz_now`, which clears E|U|N|Z and then
+        // sets them from the new result — the outgoing helper call is dead
+        // and is never emitted. Its V/C/L half still is.
+        let eunz_dead = flags.rewrites_eunz();
+        self.flush_pending_flags_eliding_eunz(eunz_dead);
         // Snapshot the SM saturation marker for the kinds that consume it,
         // and reset the variable. The marker belongs to THIS instruction —
         // `emit_saturate_sm` runs before the flag kind is declared — so
@@ -27,6 +35,10 @@ impl<'a> Emitter<'a> {
 
     /// Materialize the pending flags.
     pub(super) fn flush_pending_flags(&mut self) {
+        self.flush_pending_flags_eliding_eunz(false);
+    }
+
+    fn flush_pending_flags_eliding_eunz(&mut self, eunz_dead: bool) {
         let Some(flags) = self.pending_flags.take() else {
             return;
         };
@@ -38,19 +50,19 @@ impl<'a> Emitter<'a> {
                 result_raw,
                 is_sub,
             } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.update_vcl(source, dest, result_raw, is_sub);
                 self.emit_sm_vl_deferred();
             }
             PendingFlags::NzClearV { result56 } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.clear_v_flag();
             }
             PendingFlags::NzOnly { result56 } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
             }
             PendingFlags::NzClearVSm { result56 } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.clear_v_flag();
                 self.emit_sm_vl_deferred();
             }
@@ -59,17 +71,17 @@ impl<'a> Emitter<'a> {
                 product,
                 acc,
             } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.mac_set_vl(product, acc, result56);
                 self.emit_sm_vl_deferred();
             }
             PendingFlags::NzVlSm { result56, overflow } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.set_vl_overflow(overflow);
                 self.emit_sm_vl_deferred();
             }
             PendingFlags::NzSm { result56 } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.emit_sm_vl_deferred();
             }
             PendingFlags::NzVclSub {
@@ -78,7 +90,7 @@ impl<'a> Emitter<'a> {
                 dest,
                 result_raw,
             } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.update_vcl_sub(source, dest, result_raw);
             }
             PendingFlags::AddlSubl {
@@ -89,7 +101,7 @@ impl<'a> Emitter<'a> {
                 is_sub,
                 asl_v,
             } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 // C comes from the add/sub stage alone; the destination
                 // shift's carry-out does NOT fold into C (hardware
                 // carry-edge probes: (asl,add) 10->0, 01->1,
@@ -103,7 +115,7 @@ impl<'a> Emitter<'a> {
                 product,
                 acc,
             } => {
-                self.update_nz_now(result56);
+                self.update_nz_maybe(result56, eunz_dead);
                 self.mac_set_vl(product, acc, result56);
             }
             PendingFlags::Shift24 {
@@ -242,6 +254,14 @@ impl<'a> Emitter<'a> {
         use crate::core::jit_update_nz;
         let real = jit_update_nz as *const () as usize;
         self.emit_call_sr_helper_i64(real, acc_val);
+    }
+
+    /// `update_nz_now` unless the caller has established that E/U/N/Z are
+    /// dead — rewritten in full before anything can read them.
+    fn update_nz_maybe(&mut self, acc_val: Value, dead: bool) {
+        if !dead {
+            self.update_nz_now(acc_val);
+        }
     }
 
     /// Update CCR flags for logical operations (AND, OR, EOR, NOT).
