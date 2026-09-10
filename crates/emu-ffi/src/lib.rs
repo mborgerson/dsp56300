@@ -208,11 +208,10 @@ pub unsafe extern "C" fn dsp56300_create(info: *const CCreateInfo) -> *mut DspJi
     let pram_size = map.p_space_end() as usize;
     let state = DspState::new(map);
 
-    let dsp = Box::new(DspJit {
+    Box::into_raw(Box::new(DspJit {
         state,
         jit: JitEngine::new(pram_size),
-    });
-    Box::into_raw(dsp)
+    }))
 }
 
 /// Destroy a DSP JIT instance.

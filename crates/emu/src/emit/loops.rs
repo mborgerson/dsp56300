@@ -9,11 +9,11 @@ use super::*;
 /// at which the check never truncates one of that program's inline loops,
 /// so above it the quantum is no longer what ends a block. Throughput
 /// cannot tell the values apart.
-const INLINE_LOOP_QUANTUM: i32 = 4096;
+pub(crate) const INLINE_LOOP_QUANTUM: i32 = 4096;
 
 impl<'a> Emitter<'a> {
     /// Emit a preemption check for an inline-loop backedge. Once this block
-    /// invocation has run `INLINE_LOOP_QUANTUM` cycles, spill all state and
+    /// invocation has run `loop_quantum` cycles, spill all state and
     /// return from the block with pc = `resume_pc` (the top of the loop
     /// body). Loop state (LF/LA/LC and the loop stack) is architectural at
     /// iteration boundaries, so the run loop resumes the remaining
@@ -37,7 +37,7 @@ impl<'a> Emitter<'a> {
         let quantum = self
             .builder
             .ins()
-            .iconst(types::I32, INLINE_LOOP_QUANTUM as i64);
+            .iconst(types::I32, self.loop_quantum as i64);
         let exceeded = self
             .builder
             .ins()
