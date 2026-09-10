@@ -1855,8 +1855,13 @@ fn test_reg_ab_ba() {
 #[test]
 fn test_movec_large_imm() {
     // Can't roundtrip(): disassembler omits destination register for immediate EA movec
+    let result = assemble_line("movec #$001234,la", 0).unwrap();
+    assert_eq!(result.word0, 0x05F43E, "word0: movec imm->la encoding");
+    assert_eq!(result.word1, Some(0x001234), "word1: immediate value");
+    // No control register accessed: demotes to the MOVE encoding
+    // (asm56300: "No control registers accessed - using MOVE encoding").
     let result = assemble_line("movec #$001234,r0", 0).unwrap();
-    assert_eq!(result.word0, 0x05F430, "word0: movec imm->r0 encoding");
+    assert_eq!(result.word0, 0x60F400, "word0: demoted PM4 long imm to r0");
     assert_eq!(result.word1, Some(0x001234), "word1: immediate value");
 }
 
@@ -2687,7 +2692,7 @@ fn test_warn_duplicate_dest_sub_register() {
             .any(|w| w.kind == WarningKind::DuplicateDestination)
     );
     // ALU writes A, PM reads into ab -- overlap (composite uses both A and B)
-    let ws = get_warnings("add x,a x:(r0)+,ab");
+    let ws = get_warnings("add x,a l:(r0)+,ab");
     assert!(
         ws.iter()
             .any(|w| w.kind == WarningKind::DuplicateDestination)
@@ -2824,8 +2829,8 @@ fn test_warn_interrupt_vector() {
         ws.iter()
             .any(|w| w.kind == WarningKind::InstructionInInterruptVector)
     );
-    // MOVEC writing to x0 -- not prohibited
-    let ws = get_warnings("  org p:$0008\n  movec #$100,x0\n");
+    // MOVEC writing to m0 -- not prohibited
+    let ws = get_warnings("  org p:$0008\n  movec #$100,m0\n");
     assert!(
         !ws.iter()
             .any(|w| w.kind == WarningKind::InstructionInInterruptVector)
@@ -3017,30 +3022,18 @@ fn test_warn_dup_dest_pm0_simple_ea() {
     );
 }
 
-// --- InvalidPm4Destination: XYAbs write with composite register ---
+// --- Composite registers are not encodable in the PM4 X-field ---
 
 #[test]
-fn test_warn_invalid_pm4_dest_xy_abs() {
-    // XYAbs write with a10 destination (composite) -- ALU dest is b so no overlap
-    let ws = get_warnings("add b,b  x:$100,a10");
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::InvalidPm4Destination),
-        "XYAbs write: a10 is an invalid PM4 destination"
-    );
-    // x is an invalid PM4 destination
-    let ws = get_warnings("add b,b  x:$100,x");
-    assert!(
-        ws.iter()
-            .any(|w| w.kind == WarningKind::InvalidPm4Destination),
-        "XYAbs write: x (composite) is an invalid PM4 destination"
-    );
+fn test_invalid_pm4_dest_xy_abs() {
+    // Composite registers (a10, x) have no code in the 5-bit PM4 field;
+    // rejected instead of silently truncating to another register.
+    assert!(assemble("add b,b  x:$100,a10").is_err());
+    assert!(assemble("add b,b  x:$100,x").is_err());
 }
 
-// --- InvalidPm4Destination: LImm with composite register that doesn't overlap ALU dest ---
-
 #[test]
-fn test_warn_invalid_pm4_dest_limm() {
+fn test_invalid_pm4_dest_limm() {
     // Immediate to a composite L register is not encodable at all
     // (asm56300: "Illegal X field destination register specified").
     assert!(assemble("add b,a  #$123456,x").is_err());
@@ -3051,12 +3044,15 @@ fn test_warn_invalid_pm4_dest_limm() {
 
 #[test]
 fn test_warn_ssh_source_and_dest_parallel() {
-    // SSH as both source and destination in a parallel RegToReg move
-    let ws = get_warnings("add b,a  ssh,ssh");
+    // SSH as both source and destination in a plain register move
+    let ws = get_warnings("move ssh,ssh");
     assert!(
         ws.iter().any(|w| w.kind == WarningKind::SshSourceAndDest),
-        "Parallel RegToReg ssh,ssh should warn SshSourceAndDest"
+        "RegToReg ssh,ssh should warn SshSourceAndDest"
     );
+    // With a parallel ALU op there is no encoding at all (SSH is not a
+    // parallel-move register).
+    assert!(assemble("add b,a  ssh,ssh").is_err());
 }
 
 // --- InstructionInInterruptVector: additional prohibited instructions ---
@@ -3314,8 +3310,8 @@ fn test_movem_force_long_write() {
 // 1f: Character literal syntax
 #[test]
 fn test_char_literal() {
-    // move #'A',x0 -- character literal as immediate (ASCII 0x41)
-    let result = assemble_line("movec #'A',x0", 0).unwrap();
+    // movec #'A',m0 -- character literal as immediate (ASCII 0x41)
+    let result = assemble_line("movec #'A',m0", 0).unwrap();
     // 'A' = 0x41; MovecImm encoding
     let (disasm, _) = dsp56300_disasm::disassemble(0, result.word0, result.word1.unwrap_or(0));
     assert!(
@@ -4199,4 +4195,174 @@ done    rts
     assert_eq!(r.symbols["mid"], 0x0003);
     // jgt(2) + nop(1) = 3 -> done at $0003 + 3 = $0006
     assert_eq!(r.symbols["done"], 0x0006);
+}
+
+// --- Control-register plain-move spellings route to the MOVEC encodings ---
+// Byte-verified against the 56300 family manual and real hardware: the
+// 5-bit PM register fields cannot name control registers, and truncating
+// the index would alias them onto other registers (m4 -> x0, omr -> n2,
+// sr -> n1, ...).
+
+#[test]
+fn test_ctrl_reg_imm_move_routes_to_movec() {
+    for (asm, w0, w1) in [
+        ("move #$04,m2", 0x0504A2, None),
+        ("move #>$04,m2", 0x05F422, Some(0x000004)),
+        ("move #$ffffff,m0", 0x05F420, Some(0xFFFFFF)),
+        ("move #$ffffff,m4", 0x05F424, Some(0xFFFFFF)),
+        ("move #$12,omr", 0x0512BA, None),
+        ("movec #$04,m2", 0x0504A2, None),
+        ("movec #>$04,m2", 0x05F422, Some(0x000004)),
+    ] {
+        let r = assemble_line(asm, 0).unwrap_or_else(|e| panic!("'{asm}' failed: {e}"));
+        assert_eq!(r.word0, w0, "word0 for '{asm}'");
+        assert_eq!(r.word1, w1, "word1 for '{asm}'");
+    }
+}
+
+#[test]
+fn test_ctrl_reg_mem_move_routes_to_movec() {
+    for (asm, w0, w1) in [
+        // Long absolute (both directions)
+        ("move m2,x:$100", 0x057022, Some(0x000100)),
+        ("move x:$100,m2", 0x05F022, Some(0x000100)),
+        ("move m4,x:$100", 0x057024, Some(0x000100)),
+        ("move sr,x:$100", 0x057039, Some(0x000100)),
+        ("move x:$100,sp", 0x05F03B, Some(0x000100)),
+        // Short absolute (aa form)
+        ("move m2,x:$30", 0x053022, None),
+        ("move x:$30,m2", 0x05B022, None),
+        // EA forms
+        ("move x:(r0)+,m2", 0x05D822, None),
+        ("move m2,y:(r1)-", 0x055162, None),
+        ("move ssh,y:(r2)", 0x05627C, None),
+        ("move omr,y:(r5)+n5", 0x054D7A, None),
+        // Explicit movec spelling matches
+        ("movec m2,x:$100", 0x057022, Some(0x000100)),
+        ("movec m2,x:$30", 0x053022, None),
+    ] {
+        let r = assemble_line(asm, 0).unwrap_or_else(|e| panic!("'{asm}' failed: {e}"));
+        assert_eq!(r.word0, w0, "word0 for '{asm}'");
+        assert_eq!(r.word1, w1, "word1 for '{asm}'");
+    }
+}
+
+#[test]
+fn test_ctrl_reg_reg_move_routes_to_movec() {
+    for (asm, w0) in [
+        ("move m2,r0", 0x0450A2),
+        ("move r0,m2", 0x04D0A2),
+        ("move omr,r0", 0x0450BA),
+        ("move a,omr", 0x04CEBA),
+        ("move m0,m1", 0x0461A0),
+        ("move ssh,ssl", 0x047DBC),
+        ("movec m2,r0", 0x0450A2),
+        ("movec r0,m2", 0x04D0A2),
+    ] {
+        let r = assemble_line(asm, 0).unwrap_or_else(|e| panic!("'{asm}' failed: {e}"));
+        assert_eq!(r.word0, w0, "word0 for '{asm}'");
+        assert_eq!(r.word1, None, "word1 for '{asm}'");
+    }
+}
+
+#[test]
+fn test_movec_demotes_to_move_encoding() {
+    // asm56300: movec with no control-register operand emits the plain MOVE
+    // encoding (with a warning). Words verified against asm56300 6.3.15.
+    for (asm, w0, w1) in [
+        ("movec r0,r1", 0x221100, None),
+        ("movec a,b", 0x21CF00, None),
+        ("movec b,r0", 0x21F000, None),
+        ("movec #$04,r0", 0x300400, None),
+        ("movec #$001234,r0", 0x60F400, Some(0x001234)),
+        ("movec x:$100,r0", 0x60F000, Some(0x000100)),
+    ] {
+        let r = assemble_line(asm, 0).unwrap_or_else(|e| panic!("'{asm}' failed: {e}"));
+        assert_eq!(r.word0, w0, "word0 for '{asm}'");
+        assert_eq!(r.word1, w1, "word1 for '{asm}'");
+    }
+}
+
+#[test]
+fn test_lua_data_register_dest() {
+    // LUA ddddd covers x0..b as well as r/n (manual 13-97; verified against
+    // asm56300 6.3.15).
+    for (asm, w0) in [
+        ("lua (r0)+,x0", 0x045804),
+        ("lua (r0)+,a", 0x04580E),
+        ("lua (r0)+,n3", 0x04581B),
+        ("lua (r0)+,r1", 0x045811),
+    ] {
+        let r = assemble_line(asm, 0).unwrap_or_else(|e| panic!("'{asm}' failed: {e}"));
+        assert_eq!(r.word0, w0, "word0 for '{asm}'");
+    }
+}
+
+#[test]
+fn test_warn_movec_uses_move_encoding() {
+    let ws = get_warnings("movec r0,r1");
+    assert!(
+        ws.iter()
+            .any(|w| w.kind == WarningKind::MovecUsesMoveEncoding),
+        "demoted movec should warn MovecUsesMoveEncoding"
+    );
+    let ws = get_warnings("movec m0,r1");
+    assert!(
+        !ws.iter()
+            .any(|w| w.kind == WarningKind::MovecUsesMoveEncoding),
+        "movec with a control register should not warn"
+    );
+}
+
+#[test]
+fn test_lua_data_register_roundtrip() {
+    roundtrip("lua (r0)+,x0", 0);
+    roundtrip("lua (r0)+,a", 0);
+    roundtrip("lua (r0)+,n3", 0);
+}
+
+#[test]
+fn test_pm_reg_field_encodings_pinned() {
+    // Correct PM4/PM3 encodings for registers that DO fit the 5-bit field
+    // (hardware-verified probe list).
+    for (asm, w0, w1) in [
+        ("move #$ffffff,x0", 0x44F400, Some(0xFFFFFF)),
+        ("move #$ffffff,r3", 0x63F400, Some(0xFFFFFF)),
+        ("move #$ffffff,n3", 0x73F400, Some(0xFFFFFF)),
+        ("move b1,x:$100", 0x557000, Some(0x000100)),
+    ] {
+        let r = assemble_line(asm, 0).unwrap_or_else(|e| panic!("'{asm}' failed: {e}"));
+        assert_eq!(r.word0, w0, "word0 for '{asm}'");
+        assert_eq!(r.word1, w1, "word1 for '{asm}'");
+    }
+}
+
+#[test]
+fn test_reg_field_reject_never_truncate() {
+    // No register field may silently truncate a register index: truncated,
+    // every one of these names a different register or an unallocated opcode.
+    for asm in [
+        // control-register move combined with a parallel ALU op
+        "add x0,a m2,r0",
+        "add x0,a m2,x:(r0)+",
+        "add x0,a x:$100,omr",
+        "add b,a ssh,ssh",
+        "add a,b #$4,m2",
+        // composite registers in 5-/6-/4-bit register fields
+        "add b,b x:$100,a10",
+        "move x:(r0)+,ab",
+        "move x:(r0+3),a10",
+        "do a10,$20",
+        "rep x",
+        "bset #0,a10",
+        "movem ab,p:$100",
+        // lua destination must fit the 5-bit ddddd field
+        "lua (r0)+,m2",
+        "lua (r0+5),a",
+    ] {
+        assert!(
+            assemble_line(asm, 0).is_err(),
+            "'{asm}' must be rejected, not truncated"
+        );
+    }
 }

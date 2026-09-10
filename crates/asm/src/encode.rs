@@ -352,9 +352,10 @@ pub fn encode(inst: &Instruction, pc: u32, sym: &SymbolTable) -> Result<EncodedI
         // Address
         Instruction::Lua { ea, dst } => {
             let (ea_bits, ext) = encode_ea(ea, sym, pc)?;
-            let reg_idx = dst.index() as u32;
+            // ddddd destination: x0..b, r0-r7, n0-n7 (manual 13-97).
+            let reg_idx = pm5_reg_bits(dst)?;
             // Template: 00000100010MMRRR000ddddd
-            let w0 = 0x044000 | ((ea_bits as u32 & 0x1F) << 8) | (reg_idx & 0x1F);
+            let w0 = 0x044000 | ((ea_bits as u32 & 0x1F) << 8) | reg_idx;
             Ok(with_ext(w0, ext))
         }
         Instruction::LuaRel {
@@ -381,15 +382,15 @@ pub fn encode(inst: &Instruction, pc: u32, sym: &SymbolTable) -> Result<EncodedI
 
         Instruction::LraRn { src, dst } => {
             // Template: 0000010011000RRR000ddddd
-            let d = dst.index() as u32;
-            Ok(word(0x04C000 | ((*src as u32) << 8) | (d & 0x1F)))
+            let d = pm5_reg_bits(dst)?;
+            Ok(word(0x04C000 | ((*src as u32) << 8) | d))
         }
         Instruction::LraDisp { target, dst } => {
             // Template: 0000010001000000010ddddd + 24-bit displacement
             let addr = eval(target, sym, pc)?;
             let rel24 = addr.wrapping_sub(pc) & 0xFFFFFF;
-            let d = dst.index() as u32;
-            Ok(words(0x044040 | (d & 0x1F), rel24))
+            let d = pm5_reg_bits(dst)?;
+            Ok(words(0x044040 | d, rel24))
         }
 
         // Tier 3
@@ -728,10 +729,10 @@ fn encode_bit_op(
 
     match target {
         BitTarget::Reg(reg) => {
-            let reg_idx = reg.index() as u32;
+            let reg_idx = reg6_bits(reg)?;
             let base = 0x0AC000 | (hi << 16);
             Ok(word(
-                base | ((reg_idx & 0x3F) << 8) | (1 << 6) | (lo << 5) | (numbit & 0x1F),
+                base | (reg_idx << 8) | (1 << 6) | (lo << 5) | (numbit & 0x1F),
             ))
         }
         BitTarget::Addr { space, addr } => {
@@ -870,9 +871,9 @@ fn encode_bit_branch(
                 ))
             }
             BitTarget::Reg(reg) => {
-                let reg_idx = reg.index() as u32;
+                let reg_idx = reg6_bits(reg)?;
                 Ok(words(
-                    0x0CC080 | (bs << 16) | ((reg_idx & 0x3F) << 8) | (set_bit << 5) | numbit,
+                    0x0CC080 | (bs << 16) | (reg_idx << 8) | (set_bit << 5) | numbit,
                     ext_word,
                 ))
             }
@@ -930,9 +931,9 @@ fn encode_bit_branch(
                 ))
             }
             BitTarget::Reg(reg) => {
-                let reg_idx = reg.index() as u32;
+                let reg_idx = reg6_bits(reg)?;
                 Ok(words(
-                    0x0AC000 | js | ((reg_idx & 0x3F) << 8) | (set_bit << 5) | numbit,
+                    0x0AC000 | js | (reg_idx << 8) | (set_bit << 5) | numbit,
                     ext_word,
                 ))
             }
@@ -980,8 +981,8 @@ fn encode_do_dor_inner(
             Ok(words(0x060080 | off | (lo << 8) | hi, ext_word))
         }
         LoopSource::Reg(reg) => {
-            let idx = reg.index() as u32;
-            Ok(words(0x06C000 | off | ((idx & 0x3F) << 8), ext_word))
+            let idx = reg6_bits(reg)?;
+            Ok(words(0x06C000 | off | (idx << 8), ext_word))
         }
         LoopSource::Aa { space, addr } => {
             let a = eval(addr, sym, pc)?;
@@ -1035,8 +1036,8 @@ fn encode_rep(source: &RepSource, sym: &SymbolTable, pc: u32) -> Result<EncodedI
             Ok(word(0x0600A0 | (lo << 8) | hi))
         }
         RepSource::Reg(reg) => {
-            let idx = reg.index() as u32;
-            Ok(word(0x06C020 | ((idx & 0x3F) << 8)))
+            let idx = reg6_bits(reg)?;
+            Ok(word(0x06C020 | (idx << 8)))
         }
         RepSource::Aa { space, addr } => {
             let a = eval(addr, sym, pc)?;
@@ -1087,12 +1088,68 @@ fn is_l_composite(reg: &Register) -> bool {
     )
 }
 
+/// Program-controller and AGU-modifier registers ($20-$3F: m0-m7, ep, vba,
+/// sc, sz, sr, omr, sp, ssh, ssl, la, lc) are reachable only through the
+/// MOVEC encodings; no plain-move register field can name them.
+fn is_movec_only(reg: &Register) -> bool {
+    !is_l_composite(reg) && reg.index() >= 0x20
+}
+
+/// 5-bit register field (Pm2 eeeee/ddddd, Pm4/Pm5 register, LRA ddddd):
+/// names only x0..b, r0-r7, n0-n7 ($04-$1F). Reject anything else rather
+/// than truncating the 6-bit register index into the field.
+fn pm5_reg_bits(reg: &Register) -> Result<u32> {
+    let idx = reg.index() as u32;
+    if is_l_composite(reg) || !(0x04..=0x1F).contains(&idx) {
+        return Err(enc_err(&format!(
+            "register {reg:?} is not encodable in a 5-bit register field"
+        )));
+    }
+    Ok(idx)
+}
+
+/// 6-bit register field (movem/movep/do/rep/bit ops dddddd): names all
+/// registers $04-$3F; L composites have no code here.
+fn reg6_bits(reg: &Register) -> Result<u32> {
+    let idx = reg.index() as u32;
+    if is_l_composite(reg) || idx < 0x04 {
+        return Err(enc_err(&format!(
+            "register {reg:?} is not encodable in a 6-bit register field"
+        )));
+    }
+    Ok(idx)
+}
+
+/// MOVEC ddddd operand: must be a program-controller register ($20-$3F);
+/// the field holds the low 5 bits of the register index.
+fn movec_ddddd(reg: &Register) -> Result<u32> {
+    if is_l_composite(reg) {
+        return Err(enc_err("L-move register not valid in movec"));
+    }
+    let idx = reg.index() as u32;
+    if idx < 0x20 {
+        return Err(enc_err(&format!(
+            "movec register must be a program-controller register (m0-m7, ep, vba, sc, sz, sr, omr, sp, ssh, ssl, la, lc), not {reg:?}"
+        )));
+    }
+    Ok(idx & 0x1F)
+}
+
 fn encode_movec_reg(src: &Register, dst: &Register, _w: bool) -> Result<EncodedInstruction> {
     if is_l_composite(src) || is_l_composite(dst) {
         return Err(enc_err("L-move register not valid in movec"));
     }
     let src_idx = src.index() as u32;
     let dst_idx = dst.index() as u32;
+    // The ddddd operand must be a program-controller register; a non-control
+    // register's index would alias into the ddddd field (e.g. r1 -> sc).
+    // With no control register accessed, asm56300 demotes to the plain MOVE
+    // encoding (and warns); mirror that.
+    if src_idx < 0x20 && dst_idx < 0x20 {
+        let s = pm5_reg_bits(src)?;
+        let d = pm5_reg_bits(dst)?;
+        return Ok(word(0x200000 | (s << 13) | (d << 8)));
+    }
     // Template: 00000100W1eeeeee101ddddd
     // W=0: src in ddddd (0x20+), dst in eeeeee. W=1: vice versa.
     if src_idx >= 0x20 {
@@ -1114,25 +1171,27 @@ fn encode_movec_aa(
     sym: &SymbolTable,
     pc: u32,
 ) -> Result<EncodedInstruction> {
-    if is_l_composite(reg) {
-        return Err(enc_err("L-move register not valid in movec"));
+    // No control register accessed: demote to the plain MOVE encoding
+    // (asm56300 behavior).
+    if !is_l_composite(reg) && reg.index() < 0x20 {
+        return encode_parallel_xy_abs(space, addr, reg, w, false, 0, sym, pc);
     }
+    let reg_idx = movec_ddddd(reg)?;
     let a = eval(addr, sym, pc)?;
     let s = ast_space_bit(space);
-    let reg_idx = reg.index() as u32;
     let w_bit = if w { 1u32 << 15 } else { 0 };
     if a > 0x3F {
         // Address exceeds 6-bit aa range; promote to EA absolute-address form.
         // Template: 00000101W1MMMRRR0s1ddddd  with MMMRRR=110_000 (abs addr)
         let ea_bits = 0b110_000u32;
         return Ok(words(
-            0x054020 | (ea_bits << 8) | w_bit | (s << 6) | (reg_idx & 0x1F),
+            0x054020 | (ea_bits << 8) | w_bit | (s << 6) | reg_idx,
             a & 0xFFFFFF,
         ));
     }
     // Template: 00000101W0aaaaaa0s1ddddd
     Ok(word(
-        0x050020 | ((a & 0x3F) << 8) | w_bit | (s << 6) | (reg_idx & 0x1F),
+        0x050020 | ((a & 0x3F) << 8) | w_bit | (s << 6) | reg_idx,
     ))
 }
 
@@ -1144,15 +1203,17 @@ fn encode_movec_ea(
     sym: &SymbolTable,
     pc: u32,
 ) -> Result<EncodedInstruction> {
-    if is_l_composite(reg) {
-        return Err(enc_err("L-move register not valid in movec"));
+    // No control register accessed: demote to the plain MOVE encoding
+    // (asm56300 behavior).
+    if !is_l_composite(reg) && reg.index() < 0x20 {
+        return encode_parallel_xy_mem(space, ea, reg, w, 0, sym, pc);
     }
+    let reg_idx = movec_ddddd(reg)?;
     let (ea_bits, ext) = encode_ea(ea, sym, pc)?;
     let s = ast_space_bit(space);
-    let reg_idx = reg.index() as u32;
     let w_bit = if w { 1u32 << 15 } else { 0 };
     // Template: 00000101W1MMMRRR0s1ddddd
-    let w0 = 0x054020 | ((ea_bits as u32) << 8) | w_bit | (s << 6) | (reg_idx & 0x1F);
+    let w0 = 0x054020 | ((ea_bits as u32) << 8) | w_bit | (s << 6) | reg_idx;
     Ok(with_ext(w0, ext))
 }
 
@@ -1162,13 +1223,15 @@ fn encode_movec_imm(
     sym: &SymbolTable,
     pc: u32,
 ) -> Result<EncodedInstruction> {
-    if is_l_composite(reg) {
-        return Err(enc_err("L-move register not valid in movec"));
+    // No control register accessed: demote to the plain MOVE encoding
+    // (asm56300 behavior).
+    if !is_l_composite(reg) && reg.index() < 0x20 {
+        return encode_plain_imm_to_reg(imm, reg, 0, sym, pc);
     }
+    let reg_idx = movec_ddddd(reg)?;
     let v = eval(imm, sym, pc)?;
-    let reg_idx = reg.index() as u32;
     // Template: 00000101iiiiiiii101ddddd
-    Ok(word(0x0500A0 | ((v & 0xFF) << 8) | (reg_idx & 0x3F)))
+    Ok(word(0x0500A0 | ((v & 0xFF) << 8) | reg_idx))
 }
 
 fn encode_movem_ea(
@@ -1179,10 +1242,10 @@ fn encode_movem_ea(
     pc: u32,
 ) -> Result<EncodedInstruction> {
     let (ea_bits, ext) = encode_ea(ea, sym, pc)?;
-    let reg_idx = reg.index() as u32;
+    let reg_idx = reg6_bits(reg)?;
     let w_bit = if w { 1u32 << 15 } else { 0 };
     // Template: 00000111W1MMMRRR10dddddd
-    let w0 = 0x074080 | ((ea_bits as u32) << 8) | w_bit | (reg_idx & 0x3F);
+    let w0 = 0x074080 | ((ea_bits as u32) << 8) | w_bit | reg_idx;
     Ok(with_ext(w0, ext))
 }
 
@@ -1194,20 +1257,18 @@ fn encode_movem_aa(
     pc: u32,
 ) -> Result<EncodedInstruction> {
     let a = eval(addr, sym, pc)?;
-    let reg_idx = reg.index() as u32;
+    let reg_idx = reg6_bits(reg)?;
     let w_bit = if w { 1u32 << 15 } else { 0 };
     if a > 0x3F {
         // Address exceeds 6-bit aa range; promote to EA absolute-address form.
         // Template: 00000111W1MMMRRR10dddddd  with MMMRRR=110_000 (abs addr)
         let ea_bits = 0b110_000u32;
         return Ok(words(
-            0x074080 | (ea_bits << 8) | w_bit | (reg_idx & 0x3F),
+            0x074080 | (ea_bits << 8) | w_bit | reg_idx,
             a & 0xFFFFFF,
         ));
     }
-    Ok(word(
-        0x070000 | ((a & 0x3F) << 8) | w_bit | (reg_idx & 0x3F),
-    ))
+    Ok(word(0x070000 | ((a & 0x3F) << 8) | w_bit | reg_idx))
 }
 
 /// Normalize 16-bit DSP56001 peripheral addresses to 24-bit DSP56300 equivalents.
@@ -1370,7 +1431,7 @@ fn encode_movep0(
     pc: u32,
 ) -> Result<EncodedInstruction> {
     let pa = normalize_periph_addr(eval(periph_addr, sym, pc)?);
-    let reg_idx = reg.index() as u32;
+    let reg_idx = reg6_bits(reg)?;
     let w_bit = if w { 1u32 << 15 } else { 0 };
 
     if pa >= 0xFFFFC0 {
@@ -1378,7 +1439,7 @@ fn encode_movep0(
         let offset = pa - 0xFFFFC0;
         let ps = ast_space_bit(periph_space);
         Ok(word(
-            0x084000 | (ps << 16) | ((reg_idx & 0x3F) << 8) | w_bit | (offset & 0x3F),
+            0x084000 | (ps << 16) | (reg_idx << 8) | w_bit | (offset & 0x3F),
         ))
     } else if pa >= 0xFFFF80 {
         // qq form: X:qq Template 00000100W1dddddd1q0qqqqq
@@ -1387,9 +1448,9 @@ fn encode_movep0(
         let q_hi = (offset >> 5) & 1; // bit 5 of offset -> bit 6 of opcode
         let q_lo = offset & 0x1F; // bits 4-0 of offset -> bits 4-0 of opcode
         let w0 = if periph_space == MemorySpace::X {
-            0x044080 | ((reg_idx & 0x3F) << 8) | w_bit | (q_hi << 6) | q_lo
+            0x044080 | (reg_idx << 8) | w_bit | (q_hi << 6) | q_lo
         } else {
-            0x044020 | ((reg_idx & 0x3F) << 8) | w_bit | (q_hi << 6) | q_lo
+            0x044020 | (reg_idx << 8) | w_bit | (q_hi << 6) | q_lo
         };
         Ok(word(w0))
     } else {
@@ -1449,7 +1510,7 @@ fn encode_move_long_disp(
 ) -> Result<EncodedInstruction> {
     let off = eval(offset, sym, pc)? as i32;
     let off24 = (off as u32) & 0xFFFFFF;
-    let reg_idx = reg.index() as u32;
+    let reg_idx = reg6_bits(reg)?;
     let w_bit = if w { 1u32 << 6 } else { 0 };
     // Template: 0000101s01110RRR1WDDDDDD + 24-bit extension (s=0 for X, s=1 for Y)
     let base = if space == MemorySpace::X {
@@ -1458,7 +1519,7 @@ fn encode_move_long_disp(
         0x0B7080
     };
     Ok(words(
-        base | ((offset_reg as u32) << 8) | w_bit | (reg_idx & 0x3F),
+        base | ((offset_reg as u32) << 8) | w_bit | reg_idx,
         off24,
     ))
 }
@@ -1474,7 +1535,13 @@ fn encode_move_short_disp(
 ) -> Result<EncodedInstruction> {
     let off = eval(offset, sym, pc)? as i32;
     let off7 = (off as u32) & 0x7F;
+    // 4-bit DDDD field: data ALU registers only ($04-$0F).
     let reg_idx = reg.index() as u32;
+    if is_l_composite(reg) || !(0x04..=0x0F).contains(&reg_idx) {
+        return Err(enc_err(&format!(
+            "register {reg:?} is not encodable in the short-displacement move register field"
+        )));
+    }
     let w_bit = if w { 1u32 << 4 } else { 0 };
     let (xxx_hi, xxx_lo) = pack_xy_imm_offset(off7);
     let is_y = if space == MemorySpace::Y { 1u32 } else { 0 };
@@ -1733,9 +1800,19 @@ fn encode_parallel(
             Ok(word(0x200000 | alu_byte))
         }
         ParallelMove::RegToReg { src, dst } => {
+            // Control registers can't be named by the 5-bit Pm2 fields; the
+            // plain-move spelling takes the MOVEC register encoding.
+            if is_movec_only(src) || is_movec_only(dst) {
+                if alu_byte != 0 {
+                    return Err(enc_err(
+                        "parallel ALU op not allowed with control-register move",
+                    ));
+                }
+                return encode_movec_reg(src, dst, true);
+            }
             // Pm2 register to register
-            let src_idx = (src.index() as u32) & 0x1F;
-            let dst_idx = (dst.index() as u32) & 0x1F;
+            let src_idx = pm5_reg_bits(src)?;
+            let dst_idx = pm5_reg_bits(dst)?;
             Ok(word(0x200000 | (src_idx << 13) | (dst_idx << 8) | alu_byte))
         }
         ParallelMove::EaUpdate { ea, dst: _ } => {
@@ -1755,15 +1832,15 @@ fn encode_parallel(
             // immediate encodings instead (asm56300: "move #$4,m0" ->
             // $0504A0, "move #>$ffffff,m0" -> $05F420 + ext). Their MOVEC
             // ddddd code is the low 5 bits of the register index.
-            if dst.index() >= 0x20 {
+            if is_movec_only(dst) {
                 if alu_byte != 0 {
                     return Err(enc_err(
                         "parallel ALU op not allowed with control-register immediate move",
                     ));
                 }
                 let code = (dst.index() as u32) & 0x1F;
-                let is_bare_lit = matches!(imm, Expr::Literal(_));
-                if is_bare_lit && v24 <= 0xFF && !force_long {
+                let is_lit = matches!(imm, Expr::Literal(_) | Expr::Frac(_));
+                if is_lit && v24 <= 0xFF && !force_long {
                     // MOVEC immediate short: 00000101iiiiiiii101ddddd
                     return Ok(word(0x0500A0 | (v24 << 8) | code));
                 }
@@ -1771,65 +1848,45 @@ fn encode_parallel(
                 // W=1, MMMRRR=110100 (immediate), s=0.
                 return Ok(words(0x05F420 | code, v24));
             }
-            let reg_idx = (dst.index() as u32) & 0x1F;
-            // PM3 short form: only for direct literal/frac tokens (not symbols
-            // or expressions).  a56 always uses PM4 for symbol references.
-            // For bare literals: PM3 when value fits in 8 bits.
-            // For fractional literals on data ALU regs: PM3 when MSB-aligned.
-            let is_bare_lit = matches!(imm, Expr::Literal(_));
-            let is_frac = matches!(imm, Expr::Frac(_));
-            // PM3 short form places 8-bit immediate in MSBs for "full" data ALU
-            // registers (a, b, x0, x1, y0, y1) but NOT for accumulator parts
-            // (a0/a1/a2/b0/b1/b2) where it's zero-extended.
-            let is_msb_reg = matches!(
-                dst,
-                Register::A
-                    | Register::B
-                    | Register::X0
-                    | Register::X1
-                    | Register::Y0
-                    | Register::Y1
-            );
-            let (pm3_ok, pm3_byte) = if is_bare_lit && v24 <= 0xFF {
-                (true, v24 as u32)
-            } else if imm.is_literal() && is_msb_reg && (v24 & 0xFFFF) == 0 {
-                // MSB-aligned: value = byte << 16, fits in PM3 short form
-                (true, (v24 >> 16) as u32)
-            } else if is_frac && !dst.is_data_alu() && v24 <= 0xFF {
-                (true, v24 as u32)
-            } else {
-                (false, 0)
-            };
-            if pm3_ok {
-                Ok(word(
-                    ((reg_idx | 0x20) << 16) | ((pm3_byte & 0xFF) << 8) | alu_byte,
-                ))
-            } else {
-                // Upgrade to Pm4 long form (24-bit immediate via extension word)
-                let (val_hi, val_lo) = pm4_reg_split(reg_idx);
-                let w0 = (1 << 22)
-                    | (val_hi << 20)
-                    | (val_lo << 16)
-                    | (1 << 15) // W=1 (read immediate to register)
-                    | (1 << 14) // EA mode
-                    | (0x34 << 8) // Immediate EA bits
-                    | alu_byte;
-                Ok(words(w0, v24))
-            }
+            encode_plain_imm_to_reg(imm, dst, alu_byte, sym, pc)
         }
         ParallelMove::XYMem {
             space,
             ea,
             reg,
             write,
-        } => encode_parallel_xy_mem(*space, ea, reg, *write, alu_byte, sym, pc),
+        } => {
+            // Control registers can't be named by the 5-bit Pm4 field; the
+            // plain-move spelling takes the MOVEC X:/Y:ea encoding.
+            if is_movec_only(reg) {
+                if alu_byte != 0 {
+                    return Err(enc_err(
+                        "parallel ALU op not allowed with control-register move",
+                    ));
+                }
+                return encode_movec_ea(*space, ea, reg, *write, sym, pc);
+            }
+            encode_parallel_xy_mem(*space, ea, reg, *write, alu_byte, sym, pc)
+        }
         ParallelMove::XYAbs {
             space,
             addr,
             reg,
             write,
             force_short,
-        } => encode_parallel_xy_abs(*space, addr, reg, *write, *force_short, alu_byte, sym, pc),
+        } => {
+            // Control registers route to the MOVEC X:/Y:aa encoding (which
+            // promotes to the absolute-EA form above the 6-bit aa range).
+            if is_movec_only(reg) {
+                if alu_byte != 0 {
+                    return Err(enc_err(
+                        "parallel ALU op not allowed with control-register move",
+                    ));
+                }
+                return encode_movec_aa(*space, addr, reg, *write, sym, pc);
+            }
+            encode_parallel_xy_abs(*space, addr, reg, *write, *force_short, alu_byte, sym, pc)
+        }
         ParallelMove::XYDouble {
             x_ea,
             x_reg,
@@ -1889,6 +1946,58 @@ fn encode_parallel(
     }
 }
 
+/// Plain-move immediate to a PM4-encodable register: PM3 short form when the
+/// literal fits, otherwise the PM4 long form with an extension word.
+fn encode_plain_imm_to_reg(
+    imm: &Expr,
+    dst: &Register,
+    alu_byte: u32,
+    sym: &SymbolTable,
+    pc: u32,
+) -> Result<EncodedInstruction> {
+    let v24 = eval(imm, sym, pc)? & 0xFFFFFF;
+    let reg_idx = pm5_reg_bits(dst)?;
+    // PM3 short form: only for direct literal/frac tokens (not symbols
+    // or expressions).  a56 always uses PM4 for symbol references.
+    // For bare literals: PM3 when value fits in 8 bits.
+    // For fractional literals on data ALU regs: PM3 when MSB-aligned.
+    let is_bare_lit = matches!(imm, Expr::Literal(_));
+    let is_frac = matches!(imm, Expr::Frac(_));
+    // PM3 short form places 8-bit immediate in MSBs for "full" data ALU
+    // registers (a, b, x0, x1, y0, y1) but NOT for accumulator parts
+    // (a0/a1/a2/b0/b1/b2) where it's zero-extended.
+    let is_msb_reg = matches!(
+        dst,
+        Register::A | Register::B | Register::X0 | Register::X1 | Register::Y0 | Register::Y1
+    );
+    let (pm3_ok, pm3_byte) = if is_bare_lit && v24 <= 0xFF {
+        (true, v24)
+    } else if imm.is_literal() && is_msb_reg && (v24 & 0xFFFF) == 0 {
+        // MSB-aligned: value = byte << 16, fits in PM3 short form
+        (true, v24 >> 16)
+    } else if is_frac && !dst.is_data_alu() && v24 <= 0xFF {
+        (true, v24)
+    } else {
+        (false, 0)
+    };
+    if pm3_ok {
+        Ok(word(
+            ((reg_idx | 0x20) << 16) | ((pm3_byte & 0xFF) << 8) | alu_byte,
+        ))
+    } else {
+        // Upgrade to Pm4 long form (24-bit immediate via extension word)
+        let (val_hi, val_lo) = pm4_reg_split(reg_idx);
+        let w0 = (1 << 22)
+            | (val_hi << 20)
+            | (val_lo << 16)
+            | (1 << 15) // W=1 (read immediate to register)
+            | (1 << 14) // EA mode
+            | (0x34 << 8) // Immediate EA bits
+            | alu_byte;
+        Ok(words(w0, v24))
+    }
+}
+
 fn encode_parallel_xy_mem(
     space: MemorySpace,
     ea: &EffectiveAddress,
@@ -1900,7 +2009,7 @@ fn encode_parallel_xy_mem(
 ) -> Result<EncodedInstruction> {
     let (ea_bits, ext) = encode_ea(ea, sym, pc)?;
     let s = ast_space_bit(space);
-    let reg_idx = reg.index() as u32;
+    let reg_idx = pm5_reg_bits(reg)?;
     let w_bit = if write { 1u32 << 15 } else { 0 };
 
     let (val_hi, val_lo) = pm4_reg_split(reg_idx);
@@ -1930,7 +2039,7 @@ fn encode_parallel_xy_abs(
 ) -> Result<EncodedInstruction> {
     let addr_val = eval(addr, sym, pc)?;
     let s = ast_space_bit(space);
-    let reg_idx = reg.index() as u32;
+    let reg_idx = pm5_reg_bits(reg)?;
     let w_bit = if write { 1u32 << 15 } else { 0 };
 
     let (val_hi, val_lo) = pm4_reg_split(reg_idx);
