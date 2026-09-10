@@ -2607,3 +2607,116 @@ fn test_run_rep_zero_alu_body_flags_untouched() {
         "CCR must still show clr's U|Z, got {ccr:02x}"
     );
 }
+
+#[test]
+fn test_run_do_forever_budget_preempt() {
+    // DO FOREVER must not monopolize run(): it executes through the
+    // non-inline block-boundary path (emit_block excludes it from
+    // inlining), so each iteration crosses the run loop and the budget
+    // applies. Guards that invariant: budget honored, loop still active
+    // (LF set), and resumable.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x000203; // do forever,$0003
+    pram[1] = 0x000003;
+    pram[2] = 0x000008; // inc A
+    pram[3] = 0x000000; // nop (LA)
+    pram[4] = 0x0C0004; // jmp $0004 (never reached)
+
+    s.run(&mut jit, 5000);
+    assert!(
+        s.cycle_count < 100000,
+        "budget ignored: consumed {} cycles",
+        s.cycle_count
+    );
+    assert_ne!(s.registers[reg::SR] & (1 << sr::LF), 0, "loop still active");
+    let a_first = s.registers[reg::A0];
+    assert!(a_first >= 1, "body must have executed");
+
+    // Resumes and keeps iterating on the next run() call.
+    s.run(&mut jit, 5000);
+    assert!(s.registers[reg::A0] > a_first, "loop must resume");
+    assert_ne!(s.registers[reg::SR] & (1 << sr::LF), 0);
+}
+
+#[test]
+fn test_run_nested_do_budget_preempt_and_resume() {
+    // Nested inline DO loops execute up to LC*LC iterations in one block
+    // invocation; the backedge check bounds a single dispatch at
+    // INLINE_LOOP_QUANTUM cycles while repeated calls still complete the
+    // loop with an exact count.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x06FF80; // do #255,$0006 (outer)
+    pram[1] = 0x000006;
+    pram[2] = 0x06FF80; // do #255,$0005 (inner)
+    pram[3] = 0x000005;
+    pram[4] = 0x000008; // inc A
+    pram[5] = 0x000000; // nop (inner LA)
+    pram[6] = 0x000000; // nop (outer LA)
+    pram[7] = 0x0C0007; // jmp $0007 (halt)
+
+    s.run(&mut jit, 1000);
+    assert!(
+        s.cycle_count < 20000,
+        "budget ignored: consumed {} cycles",
+        s.cycle_count
+    );
+
+    let mut guard = 0;
+    while s.pc != 7 && guard < 10000 {
+        s.run(&mut jit, 100000);
+        guard += 1;
+    }
+    assert_eq!(s.pc, 7, "loop must complete");
+    assert_eq!(s.registers[reg::A0], 255 * 255, "exact iteration count");
+    assert_eq!(s.registers[reg::SR] & (1 << sr::LF), 0, "LF cleared");
+}
+
+#[test]
+fn test_inline_loop_preemption_is_slice_independent() {
+    // A loop long enough to cross INLINE_LOOP_QUANTUM must reach exactly the
+    // same state whether the caller hands run() one large budget or many
+    // one-cycle ones: the preemption point is a property of the code, not
+    // of the schedule (see emit_loop_preemption_check).
+    //
+    // 5 (DO) + 255 * 20 (body) = 5105 cycles, so the quantum is crossed and
+    // the same total budget lands both runs on the same instruction.
+    const CYCLES: i32 = 5 + 255 * 20;
+
+    fn run_it(slice: i32) -> (JitEngine, Vec<u32>) {
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        pram[0] = 0x06FF80; // do #255,$0015
+        pram[1] = 0x000015;
+        for w in pram.iter_mut().take(0x16).skip(2) {
+            *w = 0x000008; // inc A  (20 body instructions, 20 cycles)
+        }
+        pram[0x16] = 0x0C0016; // jmp $0016 (park)
+        let mut given = 0;
+        while given < CYCLES {
+            let step = slice.min(CYCLES - given);
+            given += step;
+            s.run(&mut jit, step);
+        }
+        let mut out = vec![s.pc, s.cycle_count];
+        out.extend_from_slice(&s.registers);
+        (jit, out)
+    }
+
+    let (_, whole) = run_it(CYCLES);
+    let (_, sliced) = run_it(1);
+    assert_eq!(whole[0], 0x16, "loop must complete");
+    assert_eq!(whole[1], CYCLES as u32, "exact cycle count");
+    assert_eq!(whole[2 + reg::A0], 255 * 20, "exact iteration count");
+    assert_eq!(whole, sliced, "slice size changed the result");
+}
