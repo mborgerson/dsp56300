@@ -34,13 +34,45 @@ fn load_lod(pram: &mut [u32], xram: &mut [u32], yram: &mut [u32], text: &str) {
     }
 }
 
+/// Stand-ins for an embedder's peripheral callbacks. `JIT_BENCH_PERIPH=1`
+/// maps them at X:$FFFF80 and Y:$FFFF80 the way an embedder does, so the
+/// emitted code has the shape real programs run, not the buffer-only
+/// test map's.
+unsafe extern "C" fn periph_read(_opaque: *mut std::ffi::c_void, _addr: u32) -> u32 {
+    0
+}
+unsafe extern "C" fn periph_write(_opaque: *mut std::ffi::c_void, _addr: u32, _val: u32) {}
+
+fn add_periph(map: &mut MemoryMap) {
+    if std::env::var("JIT_BENCH_PERIPH").as_deref() != Ok("1") {
+        return;
+    }
+    let region = dsp56300_emu::core::MemoryRegion {
+        start: 0xFFFF80,
+        end: 0x1000000,
+        kind: dsp56300_emu::core::RegionKind::Callback {
+            opaque: std::ptr::null_mut(),
+            read_fn: periph_read,
+            write_fn: periph_write,
+        },
+    };
+    map.x_regions.push(region);
+    map.y_regions.push(region);
+}
+
 fn setup_sixcomb() -> (
     JitEngine,
     [u32; XRAM_SIZE],
     [u32; YRAM_SIZE],
     [u32; PRAM_SIZE],
 ) {
-    let jit = JitEngine::new(PRAM_SIZE);
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    if let Some(cap) = std::env::var("JIT_BENCH_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        jit.set_max_block_len(cap);
+    }
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
@@ -77,7 +109,9 @@ fn main() {
     // Cold compilation of sixcomb hf_comp
     bench("compile_cold", 100, || {
         let (mut jit, mut xram, mut yram, mut pram) = setup_sixcomb();
-        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        let mut map = MemoryMap::test(&mut xram, &mut yram, &mut pram);
+        add_periph(&mut map);
+        let mut s = DspState::new(map);
         init_state(&mut s);
         s.run(&mut jit, 1000);
     });
@@ -85,7 +119,9 @@ fn main() {
     // Warm execution of sixcomb hf_comp (blocks already compiled)
     {
         let (mut jit, mut xram, mut yram, mut pram) = setup_sixcomb();
-        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        let mut map = MemoryMap::test(&mut xram, &mut yram, &mut pram);
+        add_periph(&mut map);
+        let mut s = DspState::new(map);
         init_state(&mut s);
         s.run(&mut jit, 1000);
 
@@ -144,7 +180,9 @@ fn main() {
     // Cache invalidation + recompilation
     {
         let (mut jit, mut xram, mut yram, mut pram) = setup_sixcomb();
-        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        let mut map = MemoryMap::test(&mut xram, &mut yram, &mut pram);
+        add_periph(&mut map);
+        let mut s = DspState::new(map);
         init_state(&mut s);
         s.run(&mut jit, 1000);
 
@@ -160,7 +198,9 @@ fn main() {
     // Breakdown analysis
     {
         let (mut jit, mut xram, mut yram, mut pram) = setup_sixcomb();
-        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        let mut map = MemoryMap::test(&mut xram, &mut yram, &mut pram);
+        add_periph(&mut map);
+        let mut s = DspState::new(map);
         init_state(&mut s);
 
         let start = Instant::now();
@@ -179,6 +219,17 @@ fn main() {
         if instr_count > 0 {
             println!("  per instruction: {:?}", total / instr_count as u32);
         }
+        let st = jit.stats;
+        println!(
+            "  phases: emit {:?}, codegen {:?}, finalize {:?}",
+            std::time::Duration::from_nanos(st.emit_ns),
+            std::time::Duration::from_nanos(st.codegen_ns),
+            std::time::Duration::from_nanos(st.finalize_ns),
+        );
+        println!(
+            "  cranelift pass times (this process):\n{}",
+            cranelift_codegen::timing::take_current()
+        );
         println!("  block sizes (start..end, words):");
         for (start, end, size) in jit.block_sizes() {
             println!("    ${start:04X}..${end:04X}: {size} words");

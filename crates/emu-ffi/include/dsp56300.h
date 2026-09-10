@@ -178,6 +178,7 @@ typedef struct {
 typedef struct {
   uint64_t compiles;
   uint64_t compile_ns;
+  uint64_t compile_ns_worst;
   uint64_t invalidations;
   uint64_t cache_hits;
   uint64_t retained;
