@@ -144,6 +144,20 @@ Run any example with live audio using the runner script:
 scripts/dsp56300-run examples/reverb.a56
 ```
 
+Development documentation
+-------------------------
+
+- [`docs/ARCHITECTURE-NOTES.md`](docs/ARCHITECTURE-NOTES.md) - hardware-verified
+  behaviors where silicon differs from (or clarifies) the manual; source
+  comments cite it. Treat it as authoritative over the manual.
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) - known model gaps and
+  unimplemented modes.
+- [`tools/difftest/README.md`](tools/difftest/README.md) - the differential-testing
+  harness: how the emulator is validated against real silicon and the official
+  simulator, how to author corpus cases, run hardware captures and probes,
+  fuzz the two codegen paths against each other, and regression-check the
+  sealed goldens. Start here to improve emulation fidelity.
+
 References
 ----------
 
