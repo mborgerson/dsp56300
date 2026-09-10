@@ -498,7 +498,7 @@ impl<'a> Emitter<'a> {
         // Select based on scaling mode
         let result = self.builder.ins().select(is_s0, result_s0, result_def);
         let result = self.builder.ins().select(is_s1, result_s1, result);
-        let result = self.emit_saturate_sm(result);
+        let result = self.emit_saturate_sm_rnd(result);
 
         self.store_acc(d, result);
         // V = overflow from rounding addition.  The rounding constant is always
@@ -608,7 +608,7 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_alu_mpyr(&mut self, s1: usize, s2: usize, d: Accumulator, negate: bool) {
         let result56 = self.emit_alu_mpy_core(s1, s2, negate);
         let rounded = self.emit_rnd56(result56);
-        let rounded = self.emit_saturate_sm(rounded);
+        let rounded = self.emit_saturate_sm_rnd(rounded);
         self.store_acc(d, rounded);
         self.set_flags_nz_clear_v_sm(rounded);
     }
@@ -620,7 +620,9 @@ impl<'a> Emitter<'a> {
         let sum56 = self.mask56(sum);
         let saturated = self.emit_saturate_sm(sum56);
         self.store_acc(d, saturated);
-        self.set_flags_mac_vl_sm(sum56, result56, acc);
+        // Flags (N/Z/U/E) come from the SATURATED value on silicon;
+        // V/L for the saturation event arrive via the deferred SM path.
+        self.set_flags_mac_vl_sm(saturated, result56, acc);
     }
 
     pub(super) fn emit_alu_macr(&mut self, s1: usize, s2: usize, d: Accumulator, negate: bool) {
@@ -629,11 +631,12 @@ impl<'a> Emitter<'a> {
         let sum = self.builder.ins().iadd(acc, product);
         let sum56 = self.mask56(sum);
         let rounded = self.emit_rnd56(sum56);
-        let saturated = self.emit_saturate_sm(rounded);
+        let saturated = self.emit_saturate_sm_rnd(rounded);
         self.store_acc(d, saturated);
-        // MACR "result" is the rounded value (pre-saturation) per manual:
-        // operation is D +/- S1*S2 + r -> D
-        self.set_flags_mac_vl_sm(rounded, product, acc);
+        // Flags (N/Z/U/E) come from the SATURATED (rounded-grid) value on
+        // silicon; V/L for the saturation event arrive via the deferred
+        // SM path.
+        self.set_flags_mac_vl_sm(saturated, product, acc);
     }
 
     /// Emit a call to jit_rnd56(state, val) -> rounded i64.
@@ -1113,10 +1116,14 @@ impl<'a> Emitter<'a> {
             (val, None, None)
         };
 
-        let final_val = self.emit_saturate_sm(final_val);
+        let final_val = if matches!(op, MulShiftOp::Mpyr | MulShiftOp::Macr) {
+            self.emit_saturate_sm_rnd(final_val)
+        } else {
+            self.emit_saturate_sm(final_val)
+        };
         self.store_acc(d, final_val);
-        if let (Some(acc), Some(flag_result)) = (mac_acc, mac_flag_result) {
-            self.set_flags_mac_vl_sm(flag_result, result_m, acc);
+        if let (Some(acc), Some(_)) = (mac_acc, mac_flag_result) {
+            self.set_flags_mac_vl_sm(final_val, result_m, acc);
         } else {
             self.set_flags_nz_clear_v_sm(final_val);
         }
@@ -1186,17 +1193,16 @@ impl<'a> Emitter<'a> {
             let sum = self.builder.ins().iadd(acc, product_m);
             let sum_m = self.mask56(sum);
             if round {
-                // MACRI: flags use rounded value (operation is D +/- #xxxx*S + r)
                 let rounded = self.emit_rnd56(sum_m);
-                let saturated = self.emit_saturate_sm(rounded);
-                (saturated, Some((product_m, acc, rounded)))
+                let saturated = self.emit_saturate_sm_rnd(rounded);
+                (saturated, Some((product_m, acc)))
             } else {
                 let result_m = self.emit_saturate_sm(sum_m);
-                (result_m, Some((product_m, acc, sum_m)))
+                (result_m, Some((product_m, acc)))
             }
         } else if round {
             let rounded = self.emit_rnd56(product_m);
-            let rounded = self.emit_saturate_sm(rounded);
+            let rounded = self.emit_saturate_sm_rnd(rounded);
             (rounded, None)
         } else {
             let result_m = self.emit_saturate_sm(product_m);
@@ -1204,8 +1210,11 @@ impl<'a> Emitter<'a> {
         };
 
         self.store_acc(d, final_val);
-        if let Some((pm, acc, sum)) = vl_info {
-            self.set_flags_mac_vl_sm(sum, pm, acc);
+        // Flags (N/Z/U/E) come from the stored (post-saturation) value on
+        // silicon; V/L for the saturation event arrive via the deferred
+        // SM path.
+        if let Some((pm, acc)) = vl_info {
+            self.set_flags_mac_vl_sm(final_val, pm, acc);
         } else {
             self.set_flags_nz_clear_v_sm(final_val);
         }
