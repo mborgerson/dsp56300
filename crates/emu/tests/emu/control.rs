@@ -3899,3 +3899,160 @@ fn test_sc_tracks_stack_depth() {
     assert_eq!(s.registers[reg::SC], 0, "rts pops: sc=0");
     assert_eq!(s.registers[reg::SP] & 0xF, 0);
 }
+
+// --- Nested core faults: window truncation + parked delivery -----------
+//
+// Silicon model (probe_ill_in_shadow family): a fault arming
+// inside another core fault's shadow window overwrites the outer budget
+// (truncating the window at its own boundary), stays pending through the
+// outer fault's dispatch and handler ("parked"), and delivers
+// max(dispatch+6, last_sp_write+3) instruction completions later. SP
+// reads do not defer. See InterruptPipeline::parked_countdown.
+
+#[test]
+fn test_nested_fault_truncates_window_and_parks() {
+    // ILLEGAL as shadow word 1 of a stack-error window (probe_ill_in_shadow):
+    // the marker after the ILLEGAL is annulled (truncation), the stack error
+    // delivers first, and the parked ILLEGAL delivers after the SE handler's
+    // sp-clean + 3 completions.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+    pram[0x02] = 0x0BF080; // stack-error vector: jsr >$40
+    pram[0x03] = 0x000040;
+    pram[0x04] = 0x0BF080; // ILLEGAL vector: jsr >$60
+    pram[0x05] = 0x000060;
+
+    pram[0x20] = 0x0BFC63; // btst #3,ssh at sp=0 -> stack error, budget 6
+    pram[0x21] = 0x000005; // illegal (shadow word 1: parks, truncates window)
+    pram[0x22] = 0x381100; // move #$11,n0 - annulled by the truncated window
+    // $23.. already nops
+
+    // SE handler: record sp, clean it (SP write defers the parked fault),
+    // then jump out.
+    pram[0x40] = 0x0447B9; // movec sr,y1
+    pram[0x41] = 0x0453BB; // movec sp,r3
+    pram[0x42] = 0x0454BD; // movec ssl,r4
+    pram[0x43] = 0x0500BB; // movec #$0,sp
+    pram[0x44] = 0x000000; // nop
+    pram[0x45] = 0x0AF080; // jmp >$30
+    pram[0x46] = 0x000030;
+    // exit path $30.. nops; parked ILLEGAL delivers during $30's completion
+    // (write at $43 + 3 completions), saved PC = $31.
+
+    // ILLEGAL handler: clean sp, halt.
+    pram[0x60] = 0x0500BB; // movec #$0,sp
+    pram[0x61] = 0x000000; // nop
+    pram[0x62] = 0x0AF080; // jmp >$62 (halt)
+    pram[0x63] = 0x000062;
+
+    s.pc = 0x20;
+    s.run(&mut jit, 300);
+
+    assert_eq!(
+        s.registers[reg::N0],
+        0,
+        "marker after nested ILLEGAL is annulled"
+    );
+    assert_eq!(
+        s.registers[reg::R3],
+        0x30,
+        "SE handler saw poisoned sp, no frame"
+    );
+    assert_eq!(
+        s.stack[0][1], 0x31,
+        "parked ILLEGAL delivers 3 completions after the sp-clean (frame saved PC)"
+    );
+    assert_eq!(s.pc, 0x62, "ILLEGAL handler reached its halt loop");
+}
+
+#[test]
+fn test_parked_delivery_base_countdown_no_sp_access() {
+    // No SP access in the SE handler (probe_ill_shadow_noaccess): the parked
+    // ILLEGAL delivers on the base countdown - here during $33's completion,
+    // saved PC $34 - and its frame pushes onto the still-poisoned stack.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+    pram[0x02] = 0x0BF080; // stack-error vector: jsr >$40
+    pram[0x03] = 0x000040;
+    pram[0x04] = 0x0BF080; // ILLEGAL vector: jsr >$60
+    pram[0x05] = 0x000060;
+
+    pram[0x20] = 0x0BFC63; // btst #3,ssh at sp=0 -> stack error
+    pram[0x21] = 0x000005; // illegal (parks)
+
+    // SE handler: one SP READ (does not defer), jump to exit path.
+    pram[0x40] = 0x0453BB; // movec sp,r3
+    pram[0x41] = 0x0AF080; // jmp >$30
+    pram[0x42] = 0x000030;
+    // exit path $30-$33 nops; delivery during $33, saved PC $34.
+
+    // ILLEGAL handler: clean sp, halt.
+    pram[0x60] = 0x0500BB; // movec #$0,sp
+    pram[0x61] = 0x000000;
+    pram[0x62] = 0x0AF080; // jmp >$62 (halt)
+    pram[0x63] = 0x000062;
+
+    s.pc = 0x20;
+    s.run(&mut jit, 300);
+
+    assert_eq!(s.registers[reg::R3], 0x30, "SE handler saw poisoned sp");
+    assert_eq!(
+        s.stack[0][1], 0x34,
+        "base countdown: delivery 3 completions after the stage-0 hook"
+    );
+    assert_eq!(s.pc, 0x62, "ILLEGAL handler reached its halt loop");
+}
+
+#[test]
+fn test_parked_delivery_sp_write_defers() {
+    // Pad variant (probe_ill_shadow_pad): an SP write mid-handler defers the
+    // parked delivery to write+3 completions even though the base countdown
+    // would have expired earlier.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+    pram[0x02] = 0x0BF080; // stack-error vector: jsr >$40
+    pram[0x03] = 0x000040;
+    pram[0x04] = 0x0BF080; // ILLEGAL vector: jsr >$60
+    pram[0x05] = 0x000060;
+
+    pram[0x20] = 0x0BFC63; // btst #3,ssh at sp=0 -> stack error
+    pram[0x21] = 0x000005; // illegal (parks)
+
+    // SE handler: reads, an SP write, then pad nops. Delivery = write + 3
+    // completions -> during $46, saved PC $47 (without the deferral it
+    // would deliver during $45).
+    pram[0x40] = 0x0447B9; // movec sr,y1
+    pram[0x41] = 0x0453BB; // movec sp,r3
+    pram[0x42] = 0x0454BD; // movec ssl,r4
+    pram[0x43] = 0x0500BB; // movec #$0,sp
+    // $44-$47 nops
+    pram[0x48] = 0x0AF080; // jmp >$30 (never reached before delivery)
+    pram[0x49] = 0x000030;
+
+    // ILLEGAL handler: clean sp, halt.
+    pram[0x60] = 0x0500BB; // movec #$0,sp
+    pram[0x61] = 0x000000;
+    pram[0x62] = 0x0AF080; // jmp >$62 (halt)
+    pram[0x63] = 0x000062;
+
+    s.pc = 0x20;
+    s.run(&mut jit, 300);
+
+    assert_eq!(
+        s.stack[0][1], 0x47,
+        "SP write defers parked delivery to write+3 completions"
+    );
+    assert_eq!(s.pc, 0x62, "ILLEGAL handler reached its halt loop");
+}

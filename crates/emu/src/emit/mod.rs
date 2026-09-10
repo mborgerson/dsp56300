@@ -462,6 +462,14 @@ impl<'a> Emitter<'a> {
     /// Store a stream-word fault budget directly into the interrupt
     /// pipeline (`interrupts.fault_budget`), arming the Armed shadow
     /// model for inline posting paths that call no helper.
+    ///
+    /// The store is deliberately UNCONDITIONAL: a fault arming inside
+    /// another core fault's Armed window overwrites the outer budget,
+    /// truncating the window at the nested fault's own boundary - the
+    /// outer fault then delivers there and the nested fault parks
+    /// (silicon, probe_ill_in_shadow family: all shadow
+    /// words after the nested ILLEGAL are annulled; see
+    /// `InterruptPipeline::parked_countdown`).
     pub(super) fn emit_arm_fault_budget(&mut self, words: u32) {
         let bv = self.builder.ins().iconst(types::I32, words as i64);
         self.builder.ins().store(
