@@ -1743,9 +1743,34 @@ fn encode_parallel(
             let (ea_bits, _) = encode_ea(ea, sym, pc)?;
             Ok(word(0x204000 | ((ea_bits as u32 & 0x1F) << 8) | alu_byte))
         }
-        ParallelMove::ImmToReg { imm, dst } => {
+        ParallelMove::ImmToReg {
+            imm,
+            dst,
+            force_long,
+        } => {
             let v = eval(imm, sym, pc)?;
             let v24 = v & 0xFFFFFF;
+            // M and control registers (index >= $20) are not addressable by
+            // the 5-bit PM3/PM4 register field; they take the MOVEC
+            // immediate encodings instead (asm56300: "move #$4,m0" ->
+            // $0504A0, "move #>$ffffff,m0" -> $05F420 + ext). Their MOVEC
+            // ddddd code is the low 5 bits of the register index.
+            if dst.index() >= 0x20 {
+                if alu_byte != 0 {
+                    return Err(enc_err(
+                        "parallel ALU op not allowed with control-register immediate move",
+                    ));
+                }
+                let code = (dst.index() as u32) & 0x1F;
+                let is_bare_lit = matches!(imm, Expr::Literal(_));
+                if is_bare_lit && v24 <= 0xFF && !force_long {
+                    // MOVEC immediate short: 00000101iiiiiiii101ddddd
+                    return Ok(word(0x0500A0 | (v24 << 8) | code));
+                }
+                // MOVEC immediate long: 00000101W1MMMRRR0s1ddddd with
+                // W=1, MMMRRR=110100 (immediate), s=0.
+                return Ok(words(0x05F420 | code, v24));
+            }
             let reg_idx = (dst.index() as u32) & 0x1F;
             // PM3 short form: only for direct literal/frac tokens (not symbols
             // or expressions).  a56 always uses PM4 for symbol references.

@@ -901,7 +901,11 @@ pub enum ParallelMove {
     /// EA update: `(r0)+,r0` (Pm2).
     EaUpdate { ea: EffectiveAddress, dst: u8 },
     /// Immediate to register: `#$xx,r0` (Pm2/Pm3).
-    ImmToReg { imm: Expr, dst: Register },
+    ImmToReg {
+        imm: Expr,
+        dst: Register,
+        force_long: bool,
+    },
     /// X or Y memory read/write: `x:(r0)+,x0` or `a,x:(r0)+` (Pm4).
     XYMem {
         space: MemorySpace,

@@ -1302,6 +1302,24 @@ fn test_parallel_l_abs_encode() {
 }
 
 #[test]
+fn test_move_imm_to_m_reg_uses_movec() {
+    // M/control registers don't fit the 5-bit PM3/PM4 register field;
+    // `move #imm,<ctl reg>` must produce the MOVEC immediate encodings
+    // (asm56300: "move #$4,m0" -> $0504A0, "move #>$ffffff,m0" -> $05F420
+    // + extension word).
+    let r = assemble_line("move #$4,m0", 0).unwrap();
+    assert_eq!(r.word0, 0x0504A0);
+    assert!(r.word1.is_none());
+    let r = assemble_line("move #>$ffffff,m0", 0).unwrap();
+    assert_eq!(r.word0, 0x05F420);
+    assert_eq!(r.word1, Some(0xFFFFFF));
+    let r = assemble_line("move #$12,m5", 0).unwrap();
+    assert_eq!(r.word0, 0x0512A5);
+    let r = assemble_line("move #$34,sr", 0).unwrap();
+    assert_eq!(r.word0, 0x0534B9);
+}
+
+#[test]
 fn test_parallel_l_imm() {
     roundtrip("clr a #$123456,a10", 0);
 }
