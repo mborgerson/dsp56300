@@ -2013,9 +2013,13 @@ impl<'a> Emitter<'a> {
     /// and SR, calls the helper, invalidates SR (modified by helper).
     /// Returns the raw u32 result (bits 23:0 = value, bit 24 = no_limit).
     fn emit_call_read_accu24(&mut self, acc_idx: u32) -> Value {
-        // Flush pending CCR flags so SR is up-to-date
-        self.flush_pending_flags();
-
+        // A pending CCR computation is deliberately NOT materialized here.
+        // The helper reads SR only for the S0/S1 scaling bits, which no
+        // pending kind writes, and writes back only L and S, both by OR.
+        // Materializing afterwards therefore lands on disjoint bits: the
+        // EUNZ helper clears and sets exactly E|U|N|Z, the V/C halves clear
+        // and set V and C, and every L write in the flag machinery is a
+        // sticky OR that cannot drop the limiter's.
         // Flush only the sub-registers the helper reads + SR
         let regs = if acc_idx == 0 {
             [reg::A2, reg::A1, reg::A0]
