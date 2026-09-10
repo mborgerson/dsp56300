@@ -613,14 +613,14 @@ mod loop_paths {
         let mut body: Vec<u32> = Vec::new();
         let want = 1 + rng.n(if depth == 0 { 6 } else { 3 }) as usize;
         while body.len() < want {
-            match rng.n(if depth < 2 { 12 } else { 8 }) {
+            match rng.n(if depth < 2 { 14 } else { 10 }) {
                 0..=5 => body.push(word(rng)),
                 6..=7 => {
                     // rep #n, <instruction>
                     body.push(0x0600A0 | ((1 + rng.n(4)) << 8));
                     body.push(word(rng));
                 }
-                8..=9 => {
+                8..=9 if depth < 2 => {
                     // enddo, only where the notes say it behaves: LA-3 or
                     // earlier. Padded so it cannot drift to the end.
                     body.push(ENDDO);
@@ -628,7 +628,7 @@ mod loop_paths {
                     body.push(0);
                     body.push(0);
                 }
-                _ => {
+                10..=11 => {
                     // A nested loop, counted three ways.
                     let head_at = at + body.len();
                     let head: Vec<u32> = match rng.n(3) {
@@ -652,6 +652,27 @@ mod loop_paths {
                     body.push(la as u32);
                     body.extend(inner);
                     body.push(0);
+                }
+                _ => {
+                    // A forward conditional skip over 1-3 body words
+                    // (`forward_skip_target`): register-bit forms whose
+                    // predicate never reads SR, and a cc form that does.
+                    // A trailing pool word keeps the merge strictly
+                    // inside the body most of the time (a skip whose
+                    // target lands at LA+1 legitimately falls back to
+                    // the non-inlined path).
+                    let n = 1 + rng.n(3);
+                    let op = match rng.n(3) {
+                        0 => 0x0CC581, // brclr #1,x1,<fwd>
+                        1 => 0x0CC6A0, // brset #0,y0,<fwd>
+                        _ => 0x0D1049, // blt <fwd>
+                    };
+                    body.push(op);
+                    body.push(2 + n);
+                    for _ in 0..n {
+                        body.push(word(rng));
+                    }
+                    body.push(word(rng));
                 }
             }
         }

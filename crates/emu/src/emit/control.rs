@@ -679,6 +679,192 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// The branch-taken predicate of a bit-test branch: read the operand
+    /// (with its side effects - EA post-update, SSH pop), test the bit.
+    /// Shared by the block-terminator emitter and the inline skip form.
+    pub(super) fn emit_bit_test_predicate(
+        &mut self,
+        addr: &BitTestAddr,
+        bit_num: u8,
+        test_set: bool,
+    ) -> Value {
+        let val = self.read_bit_test_operand(addr);
+        let mask = self.builder.ins().iconst(types::I32, 1i64 << bit_num);
+        let masked = self.builder.ins().band(val, mask);
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let cc = if test_set {
+            IntCC::NotEqual
+        } else {
+            IntCC::Equal
+        };
+        self.builder.ins().icmp(cc, masked, zero)
+    }
+
+    /// Branch-taken predicate (i8, brif-ready) for an instruction
+    /// `forward_skip_target` accepted, charging its cycles and length.
+    /// The predicate runs unconditionally, exactly as the instruction
+    /// itself would evaluate it before branching.
+    pub(super) fn emit_skip_predicate(&mut self, inst: &Instruction) -> Value {
+        let bit = |e: &mut Self, addr: &BitTestAddr, bit_num: u8, test_set: bool, cycles: i64| {
+            e.set_cycles(cycles);
+            e.set_inst_len(2);
+            e.emit_bit_test_predicate(addr, bit_num, test_set)
+        };
+        match inst {
+            Instruction::BrclrEa {
+                space,
+                ea_mode,
+                bit_num,
+            } => bit(self, &BitTestAddr::ea(*space, *ea_mode), *bit_num, false, 5),
+            Instruction::BrclrAa {
+                space,
+                addr,
+                bit_num,
+            } => bit(self, &BitTestAddr::aa(*space, *addr), *bit_num, false, 5),
+            Instruction::BrclrPp {
+                space,
+                pp_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::pp(*space, *pp_offset),
+                *bit_num,
+                false,
+                5,
+            ),
+            Instruction::BrclrQq {
+                space,
+                qq_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::qq(*space, *qq_offset),
+                *bit_num,
+                false,
+                5,
+            ),
+            Instruction::BrclrReg { reg_idx, bit_num } => {
+                bit(self, &BitTestAddr::reg(*reg_idx), *bit_num, false, 5)
+            }
+            Instruction::BrsetEa {
+                space,
+                ea_mode,
+                bit_num,
+            } => bit(self, &BitTestAddr::ea(*space, *ea_mode), *bit_num, true, 5),
+            Instruction::BrsetAa {
+                space,
+                addr,
+                bit_num,
+            } => bit(self, &BitTestAddr::aa(*space, *addr), *bit_num, true, 5),
+            Instruction::BrsetPp {
+                space,
+                pp_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::pp(*space, *pp_offset),
+                *bit_num,
+                true,
+                5,
+            ),
+            Instruction::BrsetQq {
+                space,
+                qq_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::qq(*space, *qq_offset),
+                *bit_num,
+                true,
+                5,
+            ),
+            Instruction::BrsetReg { reg_idx, bit_num } => {
+                bit(self, &BitTestAddr::reg(*reg_idx), *bit_num, true, 5)
+            }
+            Instruction::JclrEa {
+                space,
+                ea_mode,
+                bit_num,
+            } => bit(self, &BitTestAddr::ea(*space, *ea_mode), *bit_num, false, 4),
+            Instruction::JclrAa {
+                space,
+                addr,
+                bit_num,
+            } => bit(self, &BitTestAddr::aa(*space, *addr), *bit_num, false, 4),
+            Instruction::JclrPp {
+                space,
+                pp_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::pp(*space, *pp_offset),
+                *bit_num,
+                false,
+                4,
+            ),
+            Instruction::JclrQq {
+                space,
+                qq_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::qq(*space, *qq_offset),
+                *bit_num,
+                false,
+                4,
+            ),
+            Instruction::JclrReg { reg_idx, bit_num } => {
+                bit(self, &BitTestAddr::reg(*reg_idx), *bit_num, false, 4)
+            }
+            Instruction::JsetEa {
+                space,
+                ea_mode,
+                bit_num,
+            } => bit(self, &BitTestAddr::ea(*space, *ea_mode), *bit_num, true, 4),
+            Instruction::JsetAa {
+                space,
+                addr,
+                bit_num,
+            } => bit(self, &BitTestAddr::aa(*space, *addr), *bit_num, true, 4),
+            Instruction::JsetPp {
+                space,
+                pp_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::pp(*space, *pp_offset),
+                *bit_num,
+                true,
+                4,
+            ),
+            Instruction::JsetQq {
+                space,
+                qq_offset,
+                bit_num,
+            } => bit(
+                self,
+                &BitTestAddr::qq(*space, *qq_offset),
+                *bit_num,
+                true,
+                4,
+            ),
+            Instruction::JsetReg { reg_idx, bit_num } => {
+                bit(self, &BitTestAddr::reg(*reg_idx), *bit_num, true, 4)
+            }
+            Instruction::Bcc { cc, .. } => {
+                self.set_cycles(4);
+                self.set_inst_len(1);
+                self.eval_cc_bool(*cc)
+            }
+            Instruction::BccLong { cc } => {
+                self.set_cycles(5);
+                self.set_inst_len(2);
+                self.eval_cc_bool(*cc)
+            }
+            _ => unreachable!("emit_skip_predicate on non-skip instruction"),
+        }
+    }
+
     /// Unified bit-test-and-branch emitter for jclr/jset, jsclr/jsset,
     /// brclr/brset, bsclr/bsset.
     pub(super) fn emit_bit_test_branch(
@@ -694,16 +880,7 @@ impl<'a> Emitter<'a> {
             BitTestBranch::Branch { .. } | BitTestBranch::BranchSub { .. } => 5,
         };
         self.set_cycles(cycles);
-        let val = self.read_bit_test_operand(addr);
-        let mask = self.builder.ins().iconst(types::I32, 1i64 << bit_num);
-        let masked = self.builder.ins().band(val, mask);
-        let zero = self.builder.ins().iconst(types::I32, 0);
-        let cc = if test_set {
-            IntCC::NotEqual
-        } else {
-            IntCC::Equal
-        };
-        let cond = self.builder.ins().icmp(cc, masked, zero);
+        let cond = self.emit_bit_test_predicate(addr, bit_num, test_set);
 
         let taken_blk = self.builder.create_block();
         let not_taken_blk = self.builder.create_block();
