@@ -617,6 +617,19 @@ impl JitEngine {
                 let _ = writeln!(f, "P {:04X} {:06X}", addr, map.read_pram(addr));
             }
         }
+
+        // Full P-space, so the histogram above can be disassembled in
+        // context: the hot PCs sit inside DO loops whose header is outside
+        // any one block's extent, and on a program that swaps overlays the
+        // code at a given address is whichever overlay is resident right
+        // now - captured here, at the same moment as the counters, or not
+        // at all.
+        let _ = writeln!(f, "\n\n{}", "=".repeat(80));
+        let _ = writeln!(f, "FULL P-SPACE DUMP ({} words)", p_end);
+        let _ = writeln!(f, "{}", "=".repeat(80));
+        for addr in 0..p_end {
+            let _ = writeln!(f, "P {:04X} {:06X}", addr, map.read_pram(addr));
+        }
     }
 
     /// Get a cached compiled instruction or compile and cache it.
