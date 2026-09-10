@@ -1057,16 +1057,27 @@ impl<'a> Emitter<'a> {
 
         // Compute S * 2^-n: in accumulator format, S occupies bits [47:24],
         // so S_acc = S << 24. Then S_acc >> n = S << (24-n).
-        let shift_amount = 24i32 - shift as i32;
-        let result = if shift_amount >= 0 {
-            let c = self.builder.ins().iconst(types::I32, shift_amount as i64);
-            self.builder.ins().ishl(s_sext, c)
+        //
+        // Shift counts 0 and >= 24 are special on MCPX silicon: the
+        // effective multiplier is ZERO (probed: mpy/mpyr #0 and
+        // mpy #25 / mac #31 / mpyr #24 all yield a zero product;
+        // mac/macr leave the accumulator unchanged and compute flags
+        // from D+0). Model them as a zero product so the normal
+        // store/flag paths below do the rest.
+        let result = if shift == 0 || shift >= 24 {
+            self.builder.ins().iconst(types::I64, 0)
         } else {
-            let c = self
-                .builder
-                .ins()
-                .iconst(types::I32, (-shift_amount) as i64);
-            self.builder.ins().sshr(s_sext, c)
+            let shift_amount = 24i32 - shift as i32;
+            if shift_amount >= 0 {
+                let c = self.builder.ins().iconst(types::I32, shift_amount as i64);
+                self.builder.ins().ishl(s_sext, c)
+            } else {
+                let c = self
+                    .builder
+                    .ins()
+                    .iconst(types::I32, (-shift_amount) as i64);
+                self.builder.ins().sshr(s_sext, c)
+            }
         };
 
         // Negate if k=1

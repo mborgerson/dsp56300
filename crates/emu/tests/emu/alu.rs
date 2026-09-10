@@ -3202,9 +3202,11 @@ fn test_mac_sm_saturation_sets_v_l() {
 
 #[test]
 fn test_mul_shift_mac_overflow_sets_v() {
-    // MAC +2^0,Y1,A: product placed at A1 position, added to A
+    // MAC Y1,#1,A: product = Y1 * 2^-1, added to A
     // A near max positive, product causes bit 55 sign flip -> V=1
-    // Opcode 0x0100C2: MAC +2^0,Y1,A (s=0, QQ=00=Y1, d=0=A, k=0)
+    // (shift #0 is a zero product on silicon and cannot overflow, so the
+    // test uses shift #1)
+    // Opcode 0x0101C2: MAC Y1,#1,A (QQ=00=Y1, d=0=A, k=0)
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -3214,11 +3216,11 @@ fn test_mul_shift_mac_overflow_sets_v() {
     s.registers[reg::A2] = 0x7F;
     s.registers[reg::A1] = 0xFFFFFF;
     s.registers[reg::A0] = 0xFFFFFF;
-    // Y1 = 1 -> product = 1 << 24 = 0x00_000001_000000
-    // Sum overflows: 0x7F_FFFFFF_FFFFFF + 0x00_000001_000000 = 0x80_000000_FFFFFF
+    // Y1 = 1 -> product = 1 << 23 = 0x00_000000_800000
+    // Sum overflows: 0x7F_FFFFFF_FFFFFF + 0x00_000000_800000 = 0x80_000000_7FFFFF
     s.registers[reg::Y1] = 1;
     s.registers[reg::SR] = 0;
-    pram[0] = 0x0100C2;
+    pram[0] = 0x0101C2;
     run_one(&mut s, &mut jit);
     let v = (s.registers[reg::SR] >> sr::V) & 1;
     assert_eq!(v, 1, "MAC MulShift accumulation overflow should set V");
