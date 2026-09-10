@@ -1402,34 +1402,44 @@ fn test_addr_carry_flag() {
 }
 
 #[test]
-fn test_addl_carry_xor() {
-    // ADDL B,A: A = B + 2*A.
-    // A=0xFF:800000:000000, B=0xFF:800000:000000
-    // bit 55 of A = 1, so asl_carry = 1
-    // 2*A: d_shifted = mask56(A<<1) = 0xFF:000000:000000
-    // result = B + d_shifted = 0xFF:800000:000000 + 0xFF:000000:000000
-    //        = 0x01FE:800000:000000. Bit 56 = 1, C_from_add = 1.
-    // Correct C = C_from_add XOR asl_carry = 1 XOR 1 = 0
-    // Bug gives C = 1 OR 1 = 1
+fn test_addl_carry_from_add_stage_only() {
+    // ADDL C comes from the add stage alone; the destination shift's
+    // carry-out is ignored (hardware carry-edge probes:
+    // (asl,add) = 10 -> C=0, 01 -> C=1, 11 -> C=1). sim56300 XORs the
+    // shift-out into C; silicon does not.
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
+
+    // (asl=1, add=1): A=B=0xFF:800000:000000 -> hardware C=1
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
     pram[0] = 0x20001A; // addl B,A
     s.registers[reg::A2] = 0xFF;
     s.registers[reg::A1] = 0x800000;
-    s.registers[reg::A0] = 0x000000;
     s.registers[reg::B2] = 0xFF;
     s.registers[reg::B1] = 0x800000;
-    s.registers[reg::B0] = 0x000000;
     s.registers[reg::SR] = 0xC00300;
     run_one(&mut s, &mut jit);
-    let c = s.registers[reg::SR] & 1;
-    assert_eq!(
-        c, 0,
-        "ADDL: carry should be C_from_add XOR asl_carry, not OR"
-    );
+    assert_eq!(s.registers[reg::SR] & 1, 1, "ADDL (asl=1,add=1): C=1");
+
+    // (asl=1, add=0): addl a,b is B = A + 2*B, so the shifted operand is
+    // B. B=0x80:000000:000000 (shift-out 1), A=1 (no add carry) -> C=0.
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::B2] = 0x80;
+    s.registers[reg::A0] = 1;
+    s.registers[reg::SR] = 0xC00300;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::SR] & 1, 0, "ADDL (asl=1,add=0): C=0");
+
+    // SUBL (asl=1, borrow=0): subl b,a is A = 2*A - B; A=0x80:...:0
+    // (shift-out 1), B=0 (no borrow) -> C=0.
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    pram[0] = 0x200016; // subl b,a
+    s.registers[reg::A2] = 0x80;
+    s.registers[reg::SR] = 0xC00300;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::SR] & 1, 0, "SUBL (asl=1,borrow=0): C=0");
 }
 #[test]
 fn test_addl_v_from_shift_overflow() {

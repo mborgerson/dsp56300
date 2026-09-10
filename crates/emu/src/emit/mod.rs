@@ -246,14 +246,14 @@ enum PendingFlags {
         dest: Value,
         result_raw: Value,
     },
-    /// EUNZ + VCL + XOR carry + OR overflow + SM (ADDL/SUBL).
+    /// EUNZ + VCL + OR shift-overflow + SM (ADDL/SUBL). C comes from the
+    /// add/sub stage only (hardware-verified); the shift contributes V/L.
     AddlSubl {
         result56: Value,
         source: Value,
         dest_shifted: Value,
         result_raw: Value,
         is_sub: bool,
-        asl_carry: Value,
         asl_v: Value,
     },
     /// EUNZ + DMAC VL (no SM deferred).

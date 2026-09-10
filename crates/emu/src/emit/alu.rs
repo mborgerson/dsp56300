@@ -319,7 +319,8 @@ impl<'a> Emitter<'a> {
         let s = self.load_acc(src);
         let d = self.load_acc(dst);
         let c1 = self.builder.ins().iconst(types::I32, 1);
-        // ASL flags: carry = bit 55, v = (bit55 before != bit55 after)
+        // ASL overflow: v = (bit55 before != bit55 after). The shift's
+        // carry-out does NOT contribute to C (hardware-verified).
         let asl_carry = self.extract_bit_i64(d, 55);
         let d_shifted = self.builder.ins().ishl(d, c1);
         let d_shifted = self.mask56(d_shifted);
@@ -333,20 +334,13 @@ impl<'a> Emitter<'a> {
         let result56 = self.mask56(result);
         let result56 = self.emit_saturate_sm(result56);
         self.store_acc(dst, result56);
-        self.set_flags_addl_subl(result56, s, d_shifted, result, is_sub, asl_carry, asl_v);
+        self.set_flags_addl_subl(result56, s, d_shifted, result, is_sub, asl_v);
     }
 
-    /// XOR `carry` into SR.C, OR `overflow` into SR.V and SR.L.
-    /// Used by ADDL/SUBL where the shift carry combines with the add/sub carry via XOR.
-    pub(super) fn xor_c_or_vl(&mut self, carry: Value, overflow: Value) {
+    /// OR `overflow` into SR.V and SR.L (ADDL/SUBL shift overflow).
+    pub(super) fn or_vl_sr(&mut self, overflow: Value) {
         let sr_val = self.load_reg(reg::SR);
-        // XOR carry into C (bit 0)
-        let sr_new = self.builder.ins().bxor(sr_val, carry);
-        // OR overflow into V and L
-        let v_bit = self.shift_to_bit(overflow, sr::V);
-        let sr_new = self.builder.ins().bor(sr_new, v_bit);
-        let l_bit = self.shift_to_bit(overflow, sr::L);
-        let sr_new = self.builder.ins().bor(sr_new, l_bit);
+        let sr_new = self.or_vl(sr_val, overflow);
         self.store_reg(reg::SR, sr_new);
     }
 
