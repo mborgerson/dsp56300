@@ -88,7 +88,54 @@ pub struct JitEngine {
     pram_size: usize,
     /// Block execution profiler: \[hit_count, total_cycles\] per PC.
     block_profile: Option<Vec<(u64, u64)>>,
+    /// Translations kept past invalidation, keyed by the code itself.
+    /// Key: (start_pc, stop_pc) -> candidates (the words translated, function).
+    translations: HashMap<(u32, u32), Vec<(Box<[u32]>, CompiledFn)>>,
+    /// Total candidates held, so the cache can be bounded.
+    translation_count: usize,
+    /// Translation accounting. Cheap enough to keep unconditional, and the
+    /// only thing that distinguishes a slow program from one whose code is
+    /// being rebuilt faster than it runs.
+    pub stats: JitStats,
 }
+
+/// Translation counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JitStats {
+    /// Blocks handed to Cranelift.
+    pub compiles: u64,
+    /// Nanoseconds spent translating.
+    pub compile_ns: u64,
+    /// Cached blocks dropped because the words under them changed.
+    pub invalidations: u64,
+    /// Translations reused from the content cache instead of rebuilt.
+    pub cache_hits: u64,
+}
+
+/// A retained translation: the words it was compiled from, the function,
+/// and whether the block ended at the instruction cap rather than at a
+/// terminator.
+type Translation = (Box<[u32]>, CompiledFn, bool);
+
+/// Whether PRAM still holds `words` starting at `start_pc`. Two translations
+/// of a range are interchangeable exactly when its words are unchanged, so
+/// this is compared in full rather than by a digest.
+fn pram_matches(map: &MemoryMap, start_pc: u32, words: &[u32]) -> bool {
+    words
+        .iter()
+        .enumerate()
+        .all(|(i, &w)| map.read_pram(start_pc + i as u32) == w)
+}
+
+/// Snapshot the PRAM words a block covers.
+fn block_words(map: &MemoryMap, start_pc: u32, end_pc: u32) -> Box<[u32]> {
+    (start_pc..end_pc).map(|pc| map.read_pram(pc)).collect()
+}
+
+/// Cap on retained translations. Real programs cycle a bounded set of
+/// overlays; a runaway generator of distinct code should not grow the cache
+/// without limit, so past this it is dropped wholesale and refilled.
+const MAX_TRANSLATIONS: usize = 16384;
 
 impl JitEngine {
     pub fn new(pram_size: usize) -> Self {
@@ -108,6 +155,9 @@ impl JitEngine {
             perf_map: None,
             pram_size,
             block_profile: None,
+            translations: HashMap::new(),
+            translation_count: 0,
+            stats: JitStats::default(),
         }
     }
 
@@ -178,6 +228,10 @@ impl JitEngine {
     pub fn invalidate_cache(&mut self) {
         self.cache.invalidate_all();
         self.instr_cache.clear();
+        // Retained translations point into the module's code memory, which
+        // is about to be freed.
+        self.translations.clear();
+        self.translation_count = 0;
         if let Some(old) = self.module.replace(Self::new_module()) {
             unsafe { old.free_memory() };
         }
@@ -398,6 +452,57 @@ impl JitEngine {
     /// Compile a basic block starting at `start_pc`.
     /// `stop_pc` is the address at which the block must end (LA+1 for DO
     /// loops, `u32::MAX` when no loop is active).
+    /// Return a translation for `start_pc`, reusing one whose PRAM words
+    /// still match rather than rebuilding it.
+    ///
+    /// A program that DMAs code overlays over its own P memory and re-enters
+    /// them at the same addresses gets back the words already translated -
+    /// the dirty bits say "changed" because a write happened, not because
+    /// the code differs. Keyed by content, those reloads cost a comparison
+    /// of the block instead of a Cranelift compile, which for such a program
+    /// is the difference between running the code and rebuilding it.
+    ///
+    /// Translations bake in the memory map's region pointers, so entries are
+    /// only interchangeable within one engine's map - `invalidate_cache`,
+    /// which is what a caller uses when the map changes underneath, drops them
+    /// along with the code they point at.
+    fn get_or_compile_block(
+        &mut self,
+        start_pc: u32,
+        stop_pc: u32,
+        generation: u32,
+        map: &MemoryMap,
+    ) -> CompiledBlock {
+        if let Some(candidates) = self.translations.get(&(start_pc, stop_pc)) {
+            for (words, func) in candidates {
+                if pram_matches(map, start_pc, words) {
+                    self.stats.cache_hits += 1;
+                    return CompiledBlock {
+                        func: *func,
+                        end_pc: start_pc + words.len() as u32,
+                        generation,
+                    };
+                }
+            }
+        }
+
+        let t0 = std::time::Instant::now();
+        let block = self.compile_block(start_pc, stop_pc, generation, map);
+        self.stats.compiles += 1;
+        self.stats.compile_ns += t0.elapsed().as_nanos() as u64;
+
+        if self.translation_count >= MAX_TRANSLATIONS {
+            self.translations.clear();
+            self.translation_count = 0;
+        }
+        self.translations
+            .entry((start_pc, stop_pc))
+            .or_default()
+            .push((block_words(map, start_pc, block.end_pc), block.func));
+        self.translation_count += 1;
+        block
+    }
+
     fn compile_block(
         &mut self,
         start_pc: u32,
@@ -604,7 +709,8 @@ impl DspState {
             }
 
             if jit.cache.blocks[pc as usize].is_none() {
-                let block = jit.compile_block(pc, stop_pc, self.pram_dirty.generation, &self.map);
+                let block =
+                    jit.get_or_compile_block(pc, stop_pc, self.pram_dirty.generation, &self.map);
                 // The dirty bits are shared by every block covering these
                 // words, so they can only be cleared once no cached block
                 // still needs them. Blocks overlapping the range are exactly
@@ -614,6 +720,7 @@ impl DspState {
                 // code the write replaced (an overlay load rewrites a region
                 // under a dozen cached entry points at once).
                 if self.pram_dirty.is_range_dirty(pc, block.end_pc) {
+                    jit.stats.invalidations += 1;
                     jit.cache
                         .invalidate_range(pc, block.end_pc.saturating_sub(1));
                     self.pram_dirty.clear_dirty_range(pc, block.end_pc);
@@ -879,6 +986,58 @@ mod tests {
             s.registers[reg::A0] < 10,
             "block at $02 executed stale code after $00 was recompiled"
         );
+    }
+
+    #[test]
+    fn test_translation_cache_reuses_reloaded_overlays() {
+        // An overlay swapped out and back produces the same words at the same
+        // PC, so the second load must reuse the translation rather than
+        // rebuild it - and a load that brings back *different* words must not.
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+
+        let overlay_a = [0x000008u32, 0x0C0010]; // INC A; JMP $10
+        let overlay_b = [0x00000Au32, 0x0C0010]; // DEC A; JMP $10
+        pram[0x10] = 0x0C0010; // park
+
+        let load = |s: &mut DspState, words: &[u32]| {
+            for (i, &w) in words.iter().enumerate() {
+                s.write_memory(crate::core::MemSpace::P, i as u32, w);
+                s.pram_dirty.mark_dirty(i as u32);
+            }
+        };
+
+        load(&mut s, &overlay_a);
+        s.pc = 0;
+        s.run(&mut jit, 8);
+        let first = jit.stats;
+        assert!(first.compiles > 0);
+        assert_eq!(first.cache_hits, 0);
+
+        // A different overlay over the same words: a fresh translation.
+        load(&mut s, &overlay_b);
+        s.pc = 0;
+        s.run(&mut jit, 8);
+        assert_eq!(jit.stats.compiles, first.compiles + 1);
+        assert_eq!(jit.stats.cache_hits, 0);
+        let second = jit.stats;
+
+        // The first one back again: reused, and it must still run INC A.
+        load(&mut s, &overlay_a);
+        s.registers[reg::A0] = 10;
+        s.registers[reg::A1] = 0;
+        s.registers[reg::A2] = 0;
+        s.pc = 0;
+        s.run(&mut jit, 8);
+        assert_eq!(
+            jit.stats.compiles, second.compiles,
+            "reloaded overlay was recompiled"
+        );
+        assert_eq!(jit.stats.cache_hits, 1);
+        assert_eq!(s.registers[reg::A0], 11, "cache served the wrong overlay");
     }
 
     #[test]

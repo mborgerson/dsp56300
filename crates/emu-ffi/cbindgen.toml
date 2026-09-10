@@ -28,6 +28,7 @@ include = [
     "CCreateInfo",
     "CInterruptState",
     "CDspState",
+    "CJitStats",
 ]
 
 [export.rename]
@@ -43,6 +44,7 @@ include = [
 "CCreateInfo" = "Dsp56300CreateInfo"
 "CInterruptState" = "Dsp56300InterruptState"
 "CDspState" = "Dsp56300State"
+"CJitStats" = "Dsp56300JitStats"
 
 [enum]
 prefix_with_name = true
