@@ -1,6 +1,64 @@
 use super::*;
 
+/// Cycles an inline REP/DO loop may run inside one block dispatch before it
+/// returns to the run loop. Large enough that ordinary loop nests finish
+/// inline, small enough that a runaway loop cannot hold the block for a
+/// perceptible time: 4096 cycles is ~40 us of DSP time.
+///
+/// Swept on a production workload, 4096 is the knee: the smallest value
+/// at which the check never truncates one of that program's inline loops,
+/// so above it the quantum is no longer what ends a block. Throughput
+/// cannot tell the values apart.
+const INLINE_LOOP_QUANTUM: i32 = 4096;
+
 impl<'a> Emitter<'a> {
+    /// Emit a preemption check for an inline-loop backedge. Once this block
+    /// invocation has run `INLINE_LOOP_QUANTUM` cycles, spill all state and
+    /// return from the block with pc = `resume_pc` (the top of the loop
+    /// body). Loop state (LF/LA/LC and the loop stack) is architectural at
+    /// iteration boundaries, so the run loop resumes the remaining
+    /// iterations through the non-inline block-boundary path. Without a
+    /// check here, an inline DO with a large runtime LC (register/memory
+    /// forms reach 65535) - and nested inline DOs, multiplicatively -
+    /// executes for arbitrarily long inside one block.
+    ///
+    /// The bound is a fixed quantum, not the run loop's remaining budget.
+    /// Against the budget, the caller's slice size would decide how far into
+    /// a loop the switch to the block-boundary path happens, so the same
+    /// program would take a different path through the translator depending
+    /// on how finely its host schedules it. A quantum keeps the loop
+    /// preemptible and bounded while making where it breaks a property of
+    /// the code, not of the schedule.
+    ///
+    /// Leaves the builder positioned in the continue block.
+    fn emit_loop_preemption_check(&mut self, resume_pc: u32) {
+        self.flush_pending_cycles();
+        let total = self.builder.use_var(self.total_cycles);
+        let quantum = self
+            .builder
+            .ins()
+            .iconst(types::I32, INLINE_LOOP_QUANTUM as i64);
+        let exceeded = self
+            .builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, total, quantum);
+
+        let bail = self.builder.create_block();
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(exceeded, bail, &[], cont, &[]);
+
+        self.builder.switch_to_block(bail);
+        self.builder.seal_block(bail);
+        self.flush_all_to_memory();
+        let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        self.store_pc(pc_val);
+        let ret = self.builder.use_var(self.total_cycles);
+        self.builder.ins().return_(&[ret]);
+
+        self.builder.switch_to_block(cont);
+        self.builder.seal_block(cont);
+    }
+
     /// Mask a value to 16-bit LC width using REG_MASKS[reg::LC].
     fn mask_lc(&mut self, val: Value) -> Value {
         let lc_mask = self
@@ -366,7 +424,16 @@ impl<'a> Emitter<'a> {
         // The last body op's CCR update must land inside the loop, not leak
         // past the exit where its body-defined SSA values are invalid.
         self.flush_pending_flags();
-        self.emit_lc_decrement_and_branch(loop_header, loop_exit);
+        // Route the backedge through a budget check so inline loops stay
+        // preemptible (see emit_loop_preemption_check). DO FOREVER never
+        // reaches here: emit_block excludes it from inlining and nested
+        // FOREVER fails is_do_body_inlineable.
+        let backedge = self.builder.create_block();
+        self.emit_lc_decrement_and_branch(backedge, loop_exit);
+        self.builder.switch_to_block(backedge);
+        self.builder.seal_block(backedge);
+        self.emit_loop_preemption_check(body_start);
+        self.builder.ins().jump(loop_header, &[]);
 
         // 5. Pop loop scope and emit pre-loop block with targeted loads.
         self.pop_loop_scope(loop_header);
