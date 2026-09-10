@@ -58,6 +58,7 @@ const OFF_STACK: i32 = offset_of!(DspState, stack) as i32;
 const OFF_LOOP_REP: i32 = offset_of!(DspState, loop_rep) as i32;
 const OFF_PC_ON_REP: i32 = offset_of!(DspState, pc_on_rep) as i32;
 const OFF_PC_ADVANCE: i32 = offset_of!(DspState, pc_advance) as i32;
+const OFF_MEM_WRITE_SINK: i32 = offset_of!(DspState, mem_write_sink) as i32;
 const OFF_INTERRUPT_STATE: i32 = offset_of!(DspState, interrupts.state) as i32;
 
 const OFF_INTERRUPT_PENDING_BITS: i32 = offset_of!(DspState, interrupts.pending_bits) as i32;

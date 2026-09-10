@@ -74,6 +74,12 @@ pub struct CBufferRegion {
 }
 
 /// Callback variant data for C FFI.
+///
+/// A callback may read and write the embedder's own state and the memory
+/// buffers, but not the core's registers, stack or PC: compiled code keeps
+/// those in host registers across the call and neither spills them before
+/// it nor reloads them after. Act on the register file between `run`
+/// calls through the API instead.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CCallbackRegion {
