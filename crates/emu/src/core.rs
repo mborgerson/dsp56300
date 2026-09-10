@@ -1338,22 +1338,20 @@ pub unsafe extern "C" fn jit_rnd56(state: *mut DspState, val: i64) -> i64 {
 }
 
 /// Update E, U, N, Z in SR from a 56-bit accumulator value, in all three
-/// scaling modes.
+/// scaling modes. Called about once per DSP cycle, so its shape matters:
 ///
-/// `match scaling` compiled to a jump table, so every call - and there is
-/// roughly one per DSP cycle in the MCPX EP kernel - ended in an indirect
-/// branch. Scaling is a mode, not data: it holds for long stretches (the EP
-/// kernel runs its whole snapshot in mode 0), so testing the common mode
-/// inline and outlining the other three is strictly better than an indirect
-/// jump that has to be resolved. Worth 2.6-4.1% of the kernel against a
-/// control channel of 0.4%, interleaved in one process.
+/// * SR goes in as a value and the new SR comes back, so the emitted code
+///   keeps SR in a register across the call. A `*mut DspState` form would
+///   cost a store and a reload on each side.
+/// * The common no-scaling mode is tested inline and the other three are
+///   outlined. Scaling is a mode that holds for long stretches, and a
+///   `match` on it compiles to an indirect jump.
 ///
-/// # Safety
-/// `state` must be a valid pointer to a `DspState`.
-pub unsafe extern "C" fn jit_update_nz(state: *mut DspState, acc_val: i64) {
-    let state = unsafe { &mut *state };
-    let sr = state.registers[reg::SR];
-
+/// Emitting the body inline as IR is not worth it: the call is a small
+/// fraction of the body's cost, and a program that pages overlays rebuilds
+/// tens of thousands of blocks a second, so the extra IR per site would be
+/// paid back in compile time.
+pub extern "C" fn jit_update_nz(sr: u32, acc_val: i64) -> u32 {
     let reg1 = ((acc_val >> 24) & 0xFF_FFFF) as u32; // MSP
 
     let (e, u) = if sr & ((1 << sr::S0) | (1 << sr::S1)) == 0 {
@@ -1383,7 +1381,7 @@ pub unsafe extern "C" fn jit_update_nz(state: *mut DspState, acc_val: i64) {
     if z {
         new_sr |= 1 << sr::Z;
     }
-    state.registers[reg::SR] = new_sr;
+    new_sr
 }
 
 /// E and U for the three scaling modes that are not "no scaling". Outlined

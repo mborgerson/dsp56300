@@ -2103,25 +2103,29 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Emit a call to an extern "C" fn(*mut DspState, i64) helper that only
-    /// modifies SR. Flushes and invalidates only SR, not all promoted registers.
-    fn emit_call_sr_helper_i64(&mut self, fn_addr: usize, val: Value) {
-        self.flush_reg(reg::SR);
-        self.promoted.dirty[reg::SR] = false;
+    /// Emit a call to an extern "C" fn(u32 sr, i64 acc) -> u32 helper that
+    /// returns the new SR. Nothing is flushed and nothing is reloaded: SR
+    /// goes in as a value and comes back as one, so the promoted variable
+    /// is simply redefined. A helper that writes no memory cannot leave a
+    /// load emitted earlier in an inline loop body stale across the
+    /// backedge, which is the hazard a `*mut DspState` helper would need a
+    /// flush and an eager reload to cover.
+    fn emit_call_sr_helper_pure(&mut self, fn_addr: usize, val: Value) {
+        // Safe to re-enter: `flush_pending_flags` has already taken the
+        // pending computation, so this load will not recurse into it.
+        let sr = self.load_reg(reg::SR);
         let fn_ptr = self.builder.ins().iconst(self.ptr_ty, fn_addr as i64);
         let mut sig = Signature::new(HOST_CALL_CONV);
-        sig.params.push(AbiParam::new(self.ptr_ty)); // *mut DspState
+        sig.params.push(AbiParam::new(types::I32)); // sr
         sig.params.push(AbiParam::new(types::I64)); // acc_val
+        sig.returns.push(AbiParam::new(types::I32)); // new sr
         let sig_ref = self.builder.import_signature(sig);
-        self.builder
+        let call = self
+            .builder
             .ins()
-            .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, val]);
-        // Eagerly reload the promoted SR variable from memory. Lazy
-        // invalidation is unsound in inline loop bodies (see
-        // refresh_promoted_reg): a flush arm that ends with this helper
-        // (NzOnly) would leave earlier-emitted SR loads reading a stale
-        // variable across the backedge.
-        self.refresh_promoted_reg(reg::SR);
+            .call_indirect(sig_ref, fn_ptr, &[sr, val]);
+        let new_sr = self.builder.inst_results(call)[0];
+        self.store_reg(reg::SR, new_sr);
     }
 
     /// Emit a call to an extern "C" fn(*mut DspState) -> u32 helper.
