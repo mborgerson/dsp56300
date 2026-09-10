@@ -287,6 +287,28 @@ impl PendingFlags {
         )
     }
 
+    /// The 56-bit result the E/U/N/Z helper would be called on, for the
+    /// kinds that rewrite the whole quarter (`rewrites_eunz`). This is the
+    /// deferrable part of a flush: E/U/N/Z are pure overwrites of the
+    /// result, where the V/C/L/SM half is either last-write-wins per
+    /// iteration (V, C) or a sticky OR (L, SM's V/L) that must land every
+    /// time it is computed.
+    fn nz_result56(&self) -> Option<Value> {
+        match *self {
+            PendingFlags::AluAddSub { result56, .. }
+            | PendingFlags::NzClearV { result56 }
+            | PendingFlags::NzOnly { result56 }
+            | PendingFlags::NzClearVSm { result56 }
+            | PendingFlags::MacVlSm { result56, .. }
+            | PendingFlags::NzVlSm { result56, .. }
+            | PendingFlags::NzSm { result56 }
+            | PendingFlags::NzVclSub { result56, .. }
+            | PendingFlags::AddlSubl { result56, .. }
+            | PendingFlags::DmacVl { result56, .. } => Some(result56),
+            PendingFlags::Shift24 { .. } | PendingFlags::Logical { .. } => None,
+        }
+    }
+
     /// Does materializing this kind consume the deferred SM saturation
     /// marker (`emit_sm_vl_deferred`)? Only these kinds need the marker
     /// carried alongside them.
@@ -346,6 +368,18 @@ pub struct Emitter<'a> {
     /// emission-time panic - it would strand the carried computation on
     /// one arm of the conditional.
     pub(crate) cond_keep_flags: u32,
+    /// Emission sites at which deferring flags across an inline DO's back
+    /// edge would be unsound because the loop body observes SR or leaves
+    /// JIT-compiled code mid-iteration: guest-visible SR reads (any
+    /// `load_reg(SR)` outside the flag-flush machinery's own RMW),
+    /// host-exit spills (`flush_all_to_memory`), and host memory-callback
+    /// calls. `emit_do_inline` snapshots this before its body and defers
+    /// only if the body emitted none.
+    pub(crate) defer_hazard_sites: u32,
+    /// True while `flush_pending_flags_eliding_eunz` is emitting: its own
+    /// SR loads are internal read-modify-writes of bits the deferral either
+    /// materializes itself or leaves untouched, not hazards.
+    pub(crate) in_flag_flush: bool,
     /// `sm_needs_sat_var` as it stood when `pending_flags` was recorded.
     /// Snapshotting it there frees `emit_saturate_sm` from having to
     /// materialize the previous instruction's computation before it may
@@ -454,6 +488,8 @@ impl<'a> Emitter<'a> {
             sm_needs_sat_var,
             pending_flags: None,
             cond_keep_flags: 0,
+            defer_hazard_sites: 0,
+            in_flag_flush: false,
             pending_sm_marker: None,
             cur_inst_pc: 0,
             cur_inst_len: 0,

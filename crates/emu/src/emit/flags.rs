@@ -38,6 +38,35 @@ impl<'a> Emitter<'a> {
         self.flush_pending_flags_eliding_eunz(false);
     }
 
+    /// Flush at an inline DO's back edge, deferring the E/U/N/Z helper call
+    /// to the loop exit when the pending kind allows it.
+    ///
+    /// Only the quarter defers: it is a pure overwrite of the result, so
+    /// the last iteration's call subsumes the others. The V/C/L/SM half
+    /// still materializes here, once per iteration - V and C because that
+    /// IS last-write-wins per iteration, L and the SM saturation V/L
+    /// because they are sticky ORs whose intermediate contributions are
+    /// architectural: L set by a non-final iteration must survive.
+    ///
+    /// Returns the deferred call's argument; the caller must emit
+    /// `emit_deferred_nz` with it on every exit from the loop.
+    pub(super) fn flush_pending_flags_backedge_deferring_eunz(&mut self) -> Option<Value> {
+        let result56 = self.pending_flags.as_ref().and_then(|f| f.nz_result56());
+        self.flush_pending_flags_eliding_eunz(result56.is_some());
+        result56
+    }
+
+    /// Materialize a deferred backedge E/U/N/Z computation
+    /// (`flush_pending_flags_backedge_deferring_eunz`): the helper call the
+    /// per-iteration flush elided, on the final iteration's result.
+    pub(super) fn emit_deferred_nz(&mut self, result56: Value) {
+        // The helper's SR access is the flush machinery's own RMW, not a
+        // guest observation - keep it out of `defer_hazard_sites`.
+        self.in_flag_flush = true;
+        self.update_nz_maybe(result56, false);
+        self.in_flag_flush = false;
+    }
+
     fn flush_pending_flags_eliding_eunz(&mut self, eunz_dead: bool) {
         let Some(flags) = self.pending_flags.take() else {
             return;
@@ -48,6 +77,11 @@ impl<'a> Emitter<'a> {
              the pending computation on one path (pc=${:06x})",
             self.cur_inst_pc,
         );
+        // The flush's own SR loads are internal RMWs, not backedge-deferral
+        // hazards - see `in_flag_flush`. Re-entrant flushes (load_reg(SR)
+        // from the flag code) take() None and return above, so a plain
+        // set/clear pair brackets exactly this materialization.
+        self.in_flag_flush = true;
         match flags {
             PendingFlags::AluAddSub {
                 result56,
@@ -135,6 +169,7 @@ impl<'a> Emitter<'a> {
                 self.update_nzv_logical(result24);
             }
         }
+        self.in_flag_flush = false;
     }
 
     /// Set pending EUNZ + VCL flags for a standard add/sub ALU operation.
