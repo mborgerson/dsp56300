@@ -588,12 +588,22 @@ impl<'a> Emitter<'a> {
         // For IFcc: always restore SR (CCR never updated)
         // For IFcc.U: restore SR only if condition is false
         if update_ccr {
-            // IFcc.U: conditionally update CCR
+            // IFcc.U: conditionally update CCR. Loading SR materializes
+            // the ALU op's pending flags (and consumes its SM marker)
+            // before the select.
             let post_sr = self.load_reg(reg::SR);
             let sr_result = self.builder.ins().select(cond, post_sr, save_sr);
             self.store_reg(reg::SR, sr_result);
         } else {
-            // IFcc: never update CCR
+            // IFcc: never update CCR. Discard the ALU op's still-pending
+            // flag computation outright (materializing it would land on
+            // top of the restored SR at the next flush) and neutralize
+            // its SM saturation marker, which would otherwise OR V/L
+            // into the next flag-writing op's flush.
+            self.pending_flags = None;
+            self.pending_sm_marker = None;
+            let zero = self.builder.ins().iconst(types::I32, 0);
+            self.builder.def_var(self.sm_needs_sat_var, zero);
             self.store_reg(reg::SR, save_sr);
         }
 
