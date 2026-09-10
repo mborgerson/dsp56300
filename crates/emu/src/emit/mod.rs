@@ -1369,6 +1369,12 @@ impl<'a> Emitter<'a> {
                 let rep_inst_len = decode::instruction_length(&rep_inst);
                 pc += 1 + rep_inst_len;
                 count += 2; // REP + repeated instruction
+                // Stop at an enclosing DO loop boundary so the run loop
+                // sees the sequential LA+1 crossing and performs the
+                // loop-back.
+                if pc >= stop_pc {
+                    break;
+                }
             } else if Self::is_do_instruction(&inst) {
                 // DO/DOR: try to inline as Cranelift loop if body is safe.
                 // DO FOREVER cannot be inlined (would create an infinite native loop).
@@ -1380,6 +1386,10 @@ impl<'a> Emitter<'a> {
                     let body_count = Self::count_body_instructions(self.map, pc + 2, la);
                     count += 1 + body_count; // +1 for the DO itself
                     pc = la + 1;
+                    // Stop at an enclosing DO loop boundary (see REP above).
+                    if pc >= stop_pc {
+                        break;
+                    }
                 } else {
                     // Body not inlineable -- fall back to block terminator.
                     self.emit_instruction(&inst, pc, next_word);
@@ -1462,10 +1472,17 @@ impl<'a> Emitter<'a> {
                 .ins()
                 .select(branch_taken, already_set_pc, fallthrough);
             self.store_pc(final_pc);
+            // Record how the block ended for the run loop's DO loop-back
+            // check: 0 = a branch set PC, >0 = sequential fall-through.
+            // Only sequential arrival at LA+1 triggers the loop-back
+            // (matches hardware; BRKcc branches to LA+1 without looping).
+            self.store_u32(OFF_PC_ADVANCE, cur_il);
         } else {
             // Hit max_len or end of pram without a terminator.
             let fallthrough = self.builder.ins().iconst(types::I32, pc as i64);
             self.store_pc(fallthrough);
+            let one = self.builder.ins().iconst(types::I32, 1);
+            self.store_u32(OFF_PC_ADVANCE, one);
         }
 
         pc

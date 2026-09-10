@@ -617,8 +617,13 @@ impl DspState {
 
         self.pc = mask_pc(self.pc + self.pc_advance);
 
-        // DO loop end-of-loop check
+        // DO loop end-of-loop check. Only sequential fall-through from the
+        // instruction at LA triggers the loop-back (pc_advance != 0); a
+        // branch that lands on LA+1 does not. Hardware-verified: BRKcc jumps
+        // to LA+1 with the loop state left live, and the loop neither
+        // re-enters nor decrements LC.
         if (self.registers[reg::SR] & (1 << sr::LF)) != 0
+            && self.pc_advance != 0
             && self.pc == mask_pc(self.registers[reg::LA] + 1)
         {
             self.registers[reg::LC] = self.registers[reg::LC].wrapping_sub(1) & REG_MASKS[reg::LC];
