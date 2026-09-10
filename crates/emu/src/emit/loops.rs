@@ -481,13 +481,10 @@ impl<'a> Emitter<'a> {
                 self.load_reg(reg::LC)
             }
             Instruction::DoReg { reg_idx } | Instruction::DorReg { reg_idx } => {
-                let mut val = self.read_reg_for_move(*reg_idx as usize);
-                // Manual page 13-56: "For the DO SP, expr instruction, the actual
-                // value loaded into LC is SP before DO, incremented by one."
-                if *reg_idx as usize == reg::SP {
-                    let one = self.builder.ins().iconst(types::I32, 1);
-                    val = self.builder.ins().iadd(val, one);
-                }
+                // Manual page 13-56 claims DO SP loads "SP before DO,
+                // incremented by one"; MCPX silicon loads SP unmodified
+                // (probed at SP=1 and SP=3: the body runs exactly SP times).
+                let val = self.read_reg_for_move(*reg_idx as usize);
                 self.mask_lc(val)
             }
             Instruction::DoAa { space, addr } => {
@@ -711,14 +708,10 @@ impl<'a> Emitter<'a> {
         let la = Self::compute_la(pc, next_word, relative);
         let la_val = self.builder.ins().iconst(types::I32, la as i64);
         let numreg = reg_idx as usize;
-        let mut val = self.read_reg_for_move(numreg);
-        // Manual page 13-56: "For the DO SP, expr instruction, the actual value
-        // that is loaded into the LC is the value of SP before the DO instruction
-        // executes, incremented by one."
-        if numreg == reg::SP {
-            let one = self.builder.ins().iconst(types::I32, 1);
-            val = self.builder.ins().iadd(val, one);
-        }
+        // Manual page 13-56 claims DO SP loads "SP before DO, incremented
+        // by one"; MCPX silicon loads SP unmodified (probed at SP=1 and
+        // SP=3 - see ARCHITECTURE-NOTES.md).
+        let val = self.read_reg_for_move(numreg);
         let lc_val = self.mask_lc(val);
         self.emit_do_tail(la_val, lc_val, pc, la);
     }
