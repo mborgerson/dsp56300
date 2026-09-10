@@ -342,22 +342,42 @@ impl<'a> Emitter<'a> {
         // are defined in the body and must not leak to the exit path, where
         // they would misreport flags for the zero-iteration case.
         self.flush_pending_flags();
+        // Flush the body's register writes to memory each iteration: the
+        // exit edge leaves from the HEADER (pre-body), so variables defined
+        // only in the body have no definition on the zero-iteration path -
+        // the merged exit must treat memory as authoritative (see the
+        // invalidate below; found by fuzzing: a zero-count REP whose body
+        // wrote a register zero-clobbered it at block end).
+        self.flush_promoted();
         let one = self.builder.ins().iconst(types::I32, 1);
         let new_lc = self.builder.ins().isub(lc_cur, one);
         let new_lc = self.mask_lc(new_lc);
         self.store_reg(reg::LC, new_lc);
+        // Keep LC's memory image current across the backedge (see
+        // emit_lc_decrement_and_branch): the store lands after the
+        // body-bottom flush.
+        self.flush_reg(reg::LC);
         self.builder.ins().jump(loop_header, &[]);
 
         // 6. Pop loop scope and emit pre-loop block with targeted loads
         self.pop_loop_scope(loop_header);
 
-        // 7. Switch to loop exit
+        // 7. Switch to loop exit. Both incoming paths (zero iterations via
+        // the header, N iterations via per-iteration flushes) left memory
+        // authoritative; invalidate the promotion cache so downstream code
+        // reloads from memory instead of using body-defined variables that
+        // are undefined on the zero-iteration path.
         self.builder.switch_to_block(loop_exit);
         self.builder.seal_block(loop_exit);
+        self.invalidate_promoted();
 
-        // 8. Restore LC from TEMP
+        // 8. Restore LC from TEMP - and flush it: the invalidate above
+        // makes downstream loads (e.g. an enclosing inline-DO's LC
+        // decrement) reload from memory, which still holds the REP's
+        // exhausted count until this store reaches it.
         let saved_lc = self.load_reg(reg::TEMP);
         self.store_reg(reg::LC, saved_lc);
+        self.flush_reg(reg::LC);
     }
 
     /// Emit a DO/DOR instruction as an inline Cranelift loop. The loop body
@@ -388,7 +408,12 @@ impl<'a> Emitter<'a> {
         // Pre-DO CCR state must materialize before the annul branch: a
         // set_pending inside the body would strand it on the skip path.
         self.flush_pending_flags();
-        self.emit_do_annul_check(lc_val, forever, do_pc, la, after_loop);
+        // Flush dirty registers before the annul branch (mirroring
+        // emit_rep_inline): the body may be annulled, and a flush inside
+        // it clears compile-time dirty flags globally - without this,
+        // pre-DO register state never reaches memory on the annul path.
+        self.flush_promoted();
+        self.emit_do_annul_check(lc_val, forever, do_pc, la, after_loop, true);
         self.builder.ins().jump(pre_loop, &[]);
         self.builder.switch_to_block(loop_header);
         // Don't seal loop_header yet -- back-edge coming.
@@ -424,6 +449,13 @@ impl<'a> Emitter<'a> {
         // The last body op's CCR update must land inside the loop, not leak
         // past the exit where its body-defined SSA values are invalid.
         self.flush_pending_flags();
+        // Flush the body's register writes to memory once per iteration:
+        // conditional-arm merges invalidate their destinations, and the
+        // resulting inline memory reloads re-execute EVERY iteration - a
+        // loop-carried value living only in a variable would be resurrected
+        // stale from memory on paths that skip the arm. Iteration-boundary
+        // memory currency makes every in-body reload sound.
+        self.flush_promoted();
         // Route the backedge through a budget check so inline loops stay
         // preemptible (see emit_loop_preemption_check). DO FOREVER never
         // reaches here: emit_block excludes it from inlining and nested
@@ -444,11 +476,23 @@ impl<'a> Emitter<'a> {
 
         // 7. Loop exit cleanup: pop stack, restore LA/LC/LF.
         self.emit_enddo_cleanup();
+        // Flush the body's final register state to memory on the loop path
+        // (the annul path flushed inside the annul block). Registers whose
+        // Cranelift variables are defined only inside the body have no
+        // definition on the annul path - the merged block below must treat
+        // memory as authoritative.
+        self.flush_promoted();
         self.builder.ins().jump(after_loop, &[]);
 
-        // 8. Merge point (reached from loop exit or annul skip).
+        // 8. Merge point (reached from loop exit or annul skip). Both
+        // incoming edges flushed their state; invalidate the promotion
+        // cache so downstream code reloads from memory instead of using
+        // variables that are undefined (annul path) or stale on one edge -
+        // the block-end flush would otherwise store a zero-initialized
+        // variable over valid state.
         self.builder.switch_to_block(after_loop);
         self.builder.seal_block(after_loop);
+        self.invalidate_promoted();
     }
 
     /// Compute the LC value for a REP instruction (from immediate, register,
@@ -603,6 +647,7 @@ impl<'a> Emitter<'a> {
         _do_pc: u32,
         la: u32,
         annul_target: Block,
+        flush_on_annul: bool,
     ) {
         if forever {
             return;
@@ -622,6 +667,14 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(annul_block);
         self.builder.seal_block(annul_block);
         self.emit_enddo_cleanup();
+        if flush_on_annul {
+            // Inline-loop caller: the merge block invalidates the promotion
+            // cache, so the annul path's cleanup stores (SR/LA/LC/SP) must
+            // reach memory here. The non-inline caller terminates the block
+            // right after; its unconditional block-end flush covers both
+            // paths via merged variables, so it passes false.
+            self.flush_promoted();
+        }
         let target = self
             .builder
             .ins()
@@ -641,6 +694,13 @@ impl<'a> Emitter<'a> {
         let new_lc = self.builder.ins().isub(lc, one);
         let new_lc = self.mask_lc(new_lc);
         self.store_reg(reg::LC, new_lc);
+        // Flush the decremented LC: this store happens AFTER the body-end
+        // flush, so it would otherwise cross the backedge only in the
+        // variable - any in-body consumer that reads LC from memory (a
+        // mid-body flush/invalidate point emitted earlier than this store,
+        // whose flush set was fixed at emission time) would see a stale
+        // count forever and never terminate.
+        self.flush_reg(reg::LC);
         let zero = self.builder.ins().iconst(types::I32, 0);
         let done = self.builder.ins().icmp(IntCC::Equal, new_lc, zero);
         self.builder
@@ -652,7 +712,7 @@ impl<'a> Emitter<'a> {
     fn emit_do_tail(&mut self, la_val: Value, lc_val: Value, pc: u32, la: u32) {
         let merge = self.builder.create_block();
         self.emit_do_setup(la_val, lc_val, pc + 2, false);
-        self.emit_do_annul_check(lc_val, false, pc, la, merge);
+        self.emit_do_annul_check(lc_val, false, pc, la, merge, false);
         self.builder.ins().jump(merge, &[]);
         self.builder.switch_to_block(merge);
         self.builder.seal_block(merge);
