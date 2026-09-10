@@ -5,6 +5,12 @@ impl<'a> Emitter<'a> {
     /// when SR is read via `load_reg(SR)`. The `take()` ensures re-entrant
     /// calls (from the flag computation code itself loading SR) are safe.
     fn set_pending(&mut self, flags: PendingFlags) {
+        // Materialize any previously deferred computation first. Pending
+        // kinds cover different CCR subsets (and L is sticky), so replacing
+        // without materializing loses the earlier op's contributions — e.g.
+        // add;or would drop the add's E/U/C/L, and even add;add drops the
+        // first add's sticky L.
+        self.flush_pending_flags();
         self.pending_flags = Some(flags);
     }
 

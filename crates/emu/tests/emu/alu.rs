@@ -6027,3 +6027,57 @@ fn test_tcc_r_only_not_taken() {
         "Tcc R-only not taken: R3 should be unchanged"
     );
 }
+
+#[test]
+fn test_run_block_logical_preserves_deferred_arith_flags() {
+    // add then or/eor in ONE compiled block: the logical ops update only
+    // N/Z/V, so the add's C (and E/U) must still materialize.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    // B = FF:FFFFFF:FFFFFF, X0 = 1: add X0,B -> B = 0, C=1, Z=1, U=1.
+    s.registers[reg::B2] = 0xFF;
+    s.registers[reg::B1] = 0xFFFFFF;
+    s.registers[reg::B0] = 0xFFFFFF;
+    s.registers[reg::X0] = 1;
+    pram[0] = 0x200048; // add X0,B (nop move)
+    pram[1] = 0x20004A; // or  X0,B (nop move) -> B1 |= 1, updates N/Z/V only
+    pram[2] = 0x0C0002; // jmp $0002 (halt)
+
+    s.run(&mut jit, 1000);
+    assert_eq!(s.registers[reg::B1], 1);
+    let sr_v = s.registers[reg::SR];
+    assert_ne!(sr_v & (1 << sr::C), 0, "add's carry must survive the or");
+    assert_ne!(sr_v & (1 << sr::U), 0, "add's U must survive the or");
+    assert_eq!(sr_v & (1 << sr::Z), 0, "or must clear Z (B1 != 0)");
+}
+
+#[test]
+fn test_run_block_sticky_l_across_alu_ops() {
+    // Two adds in one block: the first overflows (V=1, sticky L=1), the
+    // second does not. L must remain set at block end.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    // A = 7F:FFFFFF:FFFFFF (max positive), X0 = 1: first add overflows.
+    s.registers[reg::A2] = 0x7F;
+    s.registers[reg::A1] = 0xFFFFFF;
+    s.registers[reg::A0] = 0xFFFFFF;
+    s.registers[reg::X0] = 1;
+    pram[0] = 0x200040; // add X0,A -> overflow, V=1, L=1
+    pram[1] = 0x200040; // add X0,A -> no overflow, V=0
+    pram[2] = 0x0C0002; // jmp $0002 (halt)
+
+    s.run(&mut jit, 1000);
+    let sr_v = s.registers[reg::SR];
+    assert_eq!(sr_v & (1 << sr::V), 0, "second add must clear V");
+    assert_ne!(
+        sr_v & (1 << sr::L),
+        0,
+        "L is sticky; first add's L must survive"
+    );
+}
