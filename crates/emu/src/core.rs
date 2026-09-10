@@ -14,7 +14,15 @@ pub enum RegionKind {
     /// The caller owns the buffer; it must remain valid for the DspState lifetime.
     Buffer { base: *mut u32, offset: u32 },
     /// Callback-driven access (e.g. peripheral registers).
-    /// In JIT code this requires flush/reload of promoted registers.
+    ///
+    /// Contract: a callback may read and write the embedder's own state
+    /// and the memory buffers, but not the core's register file, stack
+    /// or PC. Compiled code keeps those in host registers across the
+    /// call and neither spills them before it nor reloads them after; a
+    /// spill/reload pair around every dynamic access in a space with a
+    /// callback region would be paid on the buffer path too. An embedder
+    /// that needs the register file acts on it between `run` calls
+    /// through the API instead.
     Callback {
         opaque: *mut c_void,
         read_fn: unsafe extern "C" fn(*mut c_void, u32) -> u32,
@@ -461,6 +469,11 @@ pub struct DspState {
     pub pc: u32,
     /// PC advance after instruction execution (word count added to PC)
     pub pc_advance: u32,
+    /// Where a dynamic-address store lands when its address misses the
+    /// space's RAM: the emitter selects between the RAM element and this
+    /// word so the store itself is unconditional (`write_mem_dyn`). Never
+    /// read.
+    pub mem_write_sink: u32,
     /// Total cycle count
     pub cycle_count: u32,
     /// General registers (indexed by reg::* constants)
@@ -526,6 +539,7 @@ impl DspState {
         Self {
             pc: 0,
             pc_advance: 0,
+            mem_write_sink: 0,
             cycle_count: 0,
             registers,
             stack: [[0; 16]; 2],

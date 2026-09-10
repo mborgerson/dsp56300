@@ -62,21 +62,6 @@ impl<'a> Emitter<'a> {
             .load(types::I32, MemFlagsData::trusted(), elem_addr, 0)
     }
 
-    /// Emit an inline store to a Buffer region at a dynamic address.
-    pub(super) fn emit_buffer_store_dyn(
-        &mut self,
-        base: *mut u32,
-        start: u32,
-        offset: u32,
-        addr: Value,
-        val: Value,
-    ) {
-        let elem_addr = self.emit_buffer_elem_addr(base, start, offset, addr);
-        self.builder
-            .ins()
-            .store(MemFlagsData::trusted(), val, elem_addr, 0);
-    }
-
     /// Emit an indirect call to a Callback region's read function.
     /// Does NOT flush/reload promoted registers -- caller is responsible.
     pub(super) fn emit_callback_read_dyn(
@@ -150,11 +135,8 @@ impl<'a> Emitter<'a> {
                 RegionKind::Callback {
                     opaque, read_fn, ..
                 } => {
-                    self.flush_promoted();
                     let addr_val = self.builder.ins().iconst(types::I32, addr as i64);
-                    let result = self.emit_callback_read_dyn(opaque, read_fn, addr_val);
-                    self.invalidate_promoted();
-                    result
+                    self.emit_callback_read_dyn(opaque, read_fn, addr_val)
                 }
             }
         } else {
@@ -174,195 +156,195 @@ impl<'a> Emitter<'a> {
                 RegionKind::Callback {
                     opaque, write_fn, ..
                 } => {
-                    self.flush_promoted();
                     let addr_val = self.builder.ins().iconst(types::I32, addr as i64);
                     self.emit_callback_write_dyn(opaque, write_fn, addr_val, masked);
-                    self.invalidate_promoted();
                 }
             }
         }
     }
 
-    /// Read memory at a dynamic address via inline region dispatch.
-    /// Generates a branch tree that checks each region at JIT compile time,
-    /// inlining buffer loads and baking callback pointers as constants.
-    /// Buffer regions skip flush/reload entirely.
-    ///
-    /// Optimizations for common memory layouts:
-    /// - Region starting at 0: skip the lower-bound check (just `addr < end`)
-    /// - Shared helpers for range check, read, and write reduce duplication
-    pub(super) fn read_mem_dyn(&mut self, space: MemSpace, addr: Value) -> Value {
-        let regions = self.map.regions(space).to_vec();
-        if regions.is_empty() {
-            return self.builder.ins().iconst(types::I32, 0);
+    /// The space's RAM: its first region, when that is a buffer starting
+    /// at address 0 - every embedder's layout. Returns (base, offset, end).
+    fn ram_region(regions: &[crate::core::MemoryRegion]) -> Option<(*mut u32, u32, u32)> {
+        match regions.first() {
+            Some(crate::core::MemoryRegion {
+                start: 0,
+                end,
+                kind: RegionKind::Buffer { base, offset },
+            }) => Some((*base, *offset, *end)),
+            _ => None,
         }
+    }
 
-        let has_callbacks = regions
-            .iter()
-            .any(|r| matches!(r.kind, RegionKind::Callback { .. }));
-        if has_callbacks {
-            self.flush_promoted();
-        }
+    /// Bounds test against `end` plus an index that is in range whether
+    /// or not the address is: a power-of-two size masks, anything else
+    /// selects. Returns (in_range, clamped index).
+    fn emit_clamped_index(&mut self, addr: Value, end: u32) -> (Value, Value) {
+        let ok = self
+            .builder
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, addr, end as i64);
+        let safe = if end.is_power_of_two() {
+            let mask = self.builder.ins().iconst(types::I32, (end - 1) as i64);
+            self.builder.ins().band(addr, mask)
+        } else {
+            let zero = self.builder.ins().iconst(types::I32, 0);
+            self.builder.ins().select(ok, addr, zero)
+        };
+        (ok, safe)
+    }
 
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I32);
-
-        for region in &regions {
-            let body_block = self.builder.create_block();
-            let next_block = self.builder.create_block();
-
-            self.emit_region_range_check(region, addr, body_block, next_block);
-
-            self.builder.switch_to_block(body_block);
-            self.builder.seal_block(body_block);
-            let result = self.emit_region_read(region, addr);
+    /// `jit_read_mem(state, space, addr)`: the run-time region walk, for
+    /// addresses outside the space's RAM.
+    fn emit_read_mem_helper(&mut self, space: MemSpace, addr: Value) -> Value {
+        let fn_ptr = self.builder.ins().iconst(
+            self.ptr_ty,
+            crate::core::jit_read_mem as *const () as usize as i64,
+        );
+        let space_val = self.builder.ins().iconst(types::I32, space as u32 as i64);
+        let mut sig = Signature::new(HOST_CALL_CONV);
+        sig.params.push(AbiParam::new(self.ptr_ty));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.returns.push(AbiParam::new(types::I32));
+        let sig_ref = self.builder.import_signature(sig);
+        let call =
             self.builder
                 .ins()
-                .jump(merge_block, &[BlockArg::Value(result)]);
+                .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, space_val, addr]);
+        self.builder.inst_results(call)[0]
+    }
 
-            self.builder.switch_to_block(next_block);
-            self.builder.seal_block(next_block);
-        }
-
-        // Unmapped fallthrough: return 0
-        let zero = self.builder.ins().iconst(types::I32, 0);
+    /// `jit_write_mem(state, space, addr, val)` for X/Y addresses outside
+    /// the space's RAM.
+    fn emit_write_mem_helper(&mut self, space: MemSpace, addr: Value, val: Value) {
+        let fn_ptr = self
+            .builder
+            .ins()
+            .iconst(self.ptr_ty, jit_write_mem as *const () as usize as i64);
+        let space_val = self.builder.ins().iconst(types::I32, space as u32 as i64);
+        let mut sig = Signature::new(HOST_CALL_CONV);
+        sig.params.push(AbiParam::new(self.ptr_ty));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I32));
+        let sig_ref = self.builder.import_signature(sig);
         self.builder
             .ins()
-            .jump(merge_block, &[BlockArg::Value(zero)]);
+            .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, space_val, addr, val]);
+    }
 
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        if has_callbacks {
-            self.invalidate_promoted();
-        }
-        let raw = self.builder.block_params(merge_block)[0];
+    /// Read memory at a dynamic address.
+    ///
+    /// The space's RAM is the fast path. Its bounds check clamps the index
+    /// instead of guarding the load, so the load is unconditional and the
+    /// common case is straight-line code that falls through; in a space
+    /// with no other region the miss value is a `select` as well and the
+    /// access has no control flow at all. Every other region - a
+    /// peripheral, a ROM, an alias - is reached from one cold block
+    /// through `jit_read_mem`, whose run-time region walk is cheaper than
+    /// a per-region branch tree is to compile: under a map with a
+    /// peripheral region a tree turns a 32-instruction block into hundreds
+    /// of Cranelift blocks, and register allocation, priced per block, is
+    /// most of a compile.
+    ///
+    /// Nothing is spilled around the call: callbacks may not touch the
+    /// register file (`RegionKind::Callback`), and the helper does not.
+    /// Spilling every dirty promoted register before the dispatch and
+    /// invalidating all of them after it - on the buffer path too, since
+    /// the branch is resolved at run time - would add ~100 loads and ~44
+    /// stores to that same block.
+    pub(super) fn read_mem_dyn(&mut self, space: MemSpace, addr: Value) -> Value {
+        let regions = self.map.regions(space);
+        let Some((base, offset, end)) = Self::ram_region(regions) else {
+            let raw = self.emit_read_mem_helper(space, addr);
+            return self.mask24(raw);
+        };
+        let single = regions.len() == 1;
+        let (ok, safe) = self.emit_clamped_index(addr, end);
+        let hit = self.emit_buffer_load_dyn(base, 0, offset, safe);
+        let raw = if single {
+            let zero = self.builder.ins().iconst(types::I32, 0);
+            self.builder.ins().select(ok, hit, zero)
+        } else {
+            let merge_blk = self.builder.create_block();
+            self.builder.append_block_param(merge_blk, types::I32);
+            let slow_blk = self.builder.create_block();
+            self.builder.set_cold_block(slow_blk);
+            self.builder
+                .ins()
+                .brif(ok, merge_blk, &[BlockArg::Value(hit)], slow_blk, &[]);
+            self.builder.switch_to_block(slow_blk);
+            self.builder.seal_block(slow_blk);
+            let miss = self.emit_read_mem_helper(space, addr);
+            self.builder.ins().jump(merge_blk, &[BlockArg::Value(miss)]);
+            self.builder.switch_to_block(merge_blk);
+            self.builder.seal_block(merge_blk);
+            self.builder.block_params(merge_blk)[0]
+        };
         self.mask24(raw)
     }
 
-    /// Write memory at a dynamic address via inline region dispatch.
-    /// P-space writes use the runtime helper for dirty bitmap tracking.
-    /// X/Y writes are fully inlined.
+    /// Write memory at a dynamic address; the mirror of `read_mem_dyn`.
+    /// The store is unconditional too: its address selects between the
+    /// RAM element and `DspState::mem_write_sink`, so a miss lands in a
+    /// word nothing reads and only then takes the cold path. P-space
+    /// writes keep the helper form for their dirty tracking.
     pub(super) fn write_mem_dyn(&mut self, space: MemSpace, addr: Value, val: Value) {
         if space == MemSpace::P {
-            // P-space writes need dirty tracking; keep using runtime helper
-            self.flush_promoted();
-            let fn_ptr = self
-                .builder
-                .ins()
-                .iconst(self.ptr_ty, jit_write_mem as *const () as usize as i64);
-            let space_val = self
-                .builder
-                .ins()
-                .iconst(types::I32, MemSpace::P as u32 as i64);
-            let mut sig = Signature::new(HOST_CALL_CONV);
-            sig.params.push(AbiParam::new(self.ptr_ty));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            sig.params.push(AbiParam::new(types::I32));
-            let sig_ref = self.builder.import_signature(sig);
-            self.builder.ins().call_indirect(
-                sig_ref,
-                fn_ptr,
-                &[self.state_ptr, space_val, addr, val],
-            );
-            self.invalidate_promoted();
-            return;
+            return self.write_mem_dyn_p(addr, val);
         }
-
-        let regions = self.map.regions(space).to_vec();
-        if regions.is_empty() {
-            return;
-        }
-
+        let regions = self.map.regions(space);
         let masked = self.mask24(val);
-
-        let has_callbacks = regions
-            .iter()
-            .any(|r| matches!(r.kind, RegionKind::Callback { .. }));
-        if has_callbacks {
-            self.flush_promoted();
-        }
-
-        let merge_block = self.builder.create_block();
-
-        for region in &regions {
-            let body_block = self.builder.create_block();
-            let next_block = self.builder.create_block();
-
-            self.emit_region_range_check(region, addr, body_block, next_block);
-
-            self.builder.switch_to_block(body_block);
-            self.builder.seal_block(body_block);
-            self.emit_region_write(region, addr, masked);
-            self.builder.ins().jump(merge_block, &[]);
-
-            self.builder.switch_to_block(next_block);
-            self.builder.seal_block(next_block);
-        }
-
-        // Unmapped fallthrough: silently drop
-        self.builder.ins().jump(merge_block, &[]);
-
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        if has_callbacks {
-            self.invalidate_promoted();
+        let Some((base, offset, end)) = Self::ram_region(regions) else {
+            self.emit_write_mem_helper(space, addr, masked);
+            return;
+        };
+        let (ok, safe) = self.emit_clamped_index(addr, end);
+        let elem = self.emit_buffer_elem_addr(base, 0, offset, safe);
+        let sink = self
+            .builder
+            .ins()
+            .iadd_imm_s(self.state_ptr, OFF_MEM_WRITE_SINK as i64);
+        let ptr = self.builder.ins().select(ok, elem, sink);
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), masked, ptr, 0);
+        if regions.len() > 1 {
+            let merge_blk = self.builder.create_block();
+            let slow_blk = self.builder.create_block();
+            self.builder.set_cold_block(slow_blk);
+            self.builder.ins().brif(ok, merge_blk, &[], slow_blk, &[]);
+            self.builder.switch_to_block(slow_blk);
+            self.builder.seal_block(slow_blk);
+            self.emit_write_mem_helper(space, addr, masked);
+            self.builder.ins().jump(merge_blk, &[]);
+            self.builder.switch_to_block(merge_blk);
+            self.builder.seal_block(merge_blk);
         }
     }
 
-    /// Emit a range check: branch to `hit` if addr is in region, `miss` otherwise.
-    fn emit_region_range_check(
-        &mut self,
-        region: &crate::core::MemoryRegion,
-        addr: Value,
-        hit: cranelift_codegen::ir::Block,
-        miss: cranelift_codegen::ir::Block,
-    ) {
-        if region.start == 0 {
-            // Region starts at 0: only need upper bound check
-            let lt_end =
-                self.builder
-                    .ins()
-                    .icmp_imm_u(IntCC::UnsignedLessThan, addr, region.end as i64);
-            self.builder.ins().brif(lt_end, hit, &[], miss, &[]);
-        } else {
-            let ge_start = self.builder.ins().icmp_imm_u(
-                IntCC::UnsignedGreaterThanOrEqual,
-                addr,
-                region.start as i64,
-            );
-            let lt_end =
-                self.builder
-                    .ins()
-                    .icmp_imm_u(IntCC::UnsignedLessThan, addr, region.end as i64);
-            let in_range = self.builder.ins().band(ge_start, lt_end);
-            self.builder.ins().brif(in_range, hit, &[], miss, &[]);
-        }
-    }
-
-    /// Emit a read from a specific region (buffer load or callback call).
-    fn emit_region_read(&mut self, region: &crate::core::MemoryRegion, addr: Value) -> Value {
-        match region.kind {
-            RegionKind::Buffer { base, offset } => {
-                self.emit_buffer_load_dyn(base, region.start, offset, addr)
-            }
-            RegionKind::Callback {
-                opaque, read_fn, ..
-            } => self.emit_callback_read_dyn(opaque, read_fn, addr),
-        }
-    }
-
-    /// Emit a write to a specific region (buffer store or callback call).
-    fn emit_region_write(&mut self, region: &crate::core::MemoryRegion, addr: Value, val: Value) {
-        match region.kind {
-            RegionKind::Buffer { base, offset } => {
-                self.emit_buffer_store_dyn(base, region.start, offset, addr, val);
-            }
-            RegionKind::Callback {
-                opaque, write_fn, ..
-            } => {
-                self.emit_callback_write_dyn(opaque, write_fn, addr, val);
-            }
-        }
+    /// P-space form of `write_mem_dyn`: the runtime helper, for its dirty
+    /// tracking.
+    fn write_mem_dyn_p(&mut self, addr: Value, val: Value) {
+        self.flush_promoted();
+        let fn_ptr = self
+            .builder
+            .ins()
+            .iconst(self.ptr_ty, jit_write_mem as *const () as usize as i64);
+        let space_val = self
+            .builder
+            .ins()
+            .iconst(types::I32, MemSpace::P as u32 as i64);
+        let mut sig = Signature::new(HOST_CALL_CONV);
+        sig.params.push(AbiParam::new(self.ptr_ty));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(types::I32));
+        let sig_ref = self.builder.import_signature(sig);
+        self.builder
+            .ins()
+            .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, space_val, addr, val]);
+        self.invalidate_promoted();
     }
 }
