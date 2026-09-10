@@ -347,6 +347,7 @@ pub unsafe extern "C" fn dsp56300_invalidate_cache(dsp: *mut DspJit) {
 pub struct CJitStats {
     pub compiles: u64,
     pub compile_ns: u64,
+    pub compile_ns_worst: u64,
     pub invalidations: u64,
     pub cache_hits: u64,
     pub retained: u64,
@@ -364,6 +365,7 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
     let JitStats {
         compiles,
         compile_ns,
+        compile_ns_worst,
         invalidations,
         cache_hits,
         retained,
@@ -374,11 +376,15 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
         // considered here.
         block_ends_do_boundary: _,
         block_ends_open: _,
+        emit_ns: _,
+        codegen_ns: _,
+        finalize_ns: _,
     } = dsp.jit.stats;
     unsafe {
         *out = CJitStats {
             compiles,
             compile_ns,
+            compile_ns_worst,
             invalidations,
             cache_hits,
             retained,

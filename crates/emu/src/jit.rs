@@ -269,6 +269,11 @@ pub struct JitStats {
     pub compiles: u64,
     /// Nanoseconds spent translating.
     pub compile_ns: u64,
+    /// Longest single translation, in nanoseconds. Cumulative maximum: a
+    /// window in which it grows is a window that contained the worst
+    /// compile seen so far, which is what a latency burst looks like from
+    /// the counters.
+    pub compile_ns_worst: u64,
     /// Cached blocks dropped because the words under them changed.
     pub invalidations: u64,
     /// Translations reused from the content cache instead of rebuilt.
@@ -290,6 +295,14 @@ pub struct JitStats {
     /// sets the cost of a block dispatch - see
     /// `bench_block_dispatch_overhead`.
     pub code_bytes: u64,
+    /// Where a block compile's time goes: building the CLIF (`emit_ns`),
+    /// Cranelift's lowering, register allocation and encoding
+    /// (`codegen_ns`), and placing the bytes in executable memory
+    /// (`finalize_ns`). Investigation counters for the burst-latency work;
+    /// three clock reads per compile, nothing on the dispatch path.
+    pub emit_ns: u64,
+    pub codegen_ns: u64,
+    pub finalize_ns: u64,
 }
 
 /// A retained translation: the words it was compiled from, the function,
@@ -381,6 +394,13 @@ impl JitEngine {
             .unwrap();
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         JITModule::new(builder)
+    }
+
+    /// Instruction cap for the blocks this engine compiles; the bench
+    /// that prices translation against block length sets it.
+    #[doc(hidden)]
+    pub fn set_max_block_len(&mut self, cap: u32) {
+        self.max_block_len = cap.max(1);
     }
 
     /// Enable perf map output for `perf record` profiling (Linux only).
@@ -815,8 +835,10 @@ impl JitEngine {
 
         let t0 = std::time::Instant::now();
         let block = self.compile_block(start_pc, stop_pc, generation, map);
+        let dt = t0.elapsed().as_nanos() as u64;
         self.stats.compiles += 1;
-        self.stats.compile_ns += t0.elapsed().as_nanos() as u64;
+        self.stats.compile_ns += dt;
+        self.stats.compile_ns_worst = self.stats.compile_ns_worst.max(dt);
 
         if self.translation_count >= MAX_TRANSLATIONS {
             self.translations.clear();
@@ -855,6 +877,7 @@ impl JitEngine {
 
         let end_pc;
         let ends_open;
+        let t_emit = std::time::Instant::now();
         {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
@@ -863,6 +886,7 @@ impl JitEngine {
             let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
             emitter.finalize_and_return(frontend_config);
         }
+        self.stats.emit_ns += t_emit.elapsed().as_nanos() as u64;
 
         let label = format!("dsp_block_{:04x}_{:04x}", start_pc, end_pc);
         let func = self.finalize_function(&label);
@@ -880,10 +904,15 @@ impl JitEngine {
         let func_id = module
             .declare_anonymous_function(&self.ctx.func.signature)
             .unwrap();
+        let t_codegen = std::time::Instant::now();
         module.define_function(func_id, &mut self.ctx).unwrap();
         let code_size = self.ctx.compiled_code().unwrap().code_buffer().len();
         module.clear_context(&mut self.ctx);
+        let t_finalize = std::time::Instant::now();
         module.finalize_definitions().unwrap();
+        let t_end = std::time::Instant::now();
+        self.stats.codegen_ns += (t_finalize - t_codegen).as_nanos() as u64;
+        self.stats.finalize_ns += (t_end - t_finalize).as_nanos() as u64;
         self.stats.code_bytes += code_size as u64;
 
         let code_ptr = module.get_finalized_function(func_id);
