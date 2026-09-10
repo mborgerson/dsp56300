@@ -615,7 +615,7 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("00000100W1eeeeee101ddddd", "movec R1, R2", |T, opc| MovecReg { src_reg: tmpl_field(T, b'e', opc) as u8, dst_reg: (opc & 0x3F) as u8, w: tmpl_w(T, opc) }),
         op!("00000101iiiiiiii101ddddd", "movec #xx, D1", |T, opc| MovecImm { imm: tmpl_imm(T, opc), dest: (opc & 0x3F) as u8 }),
         op!("00000111W1MMMRRR10dddddd", "movem P:ea <-> R", |T, opc| MovemEa { ea_mode: tmpl_ea(T, opc), numreg: tmpl_reg(T, b'd', opc), w: tmpl_w(T, opc) }),
-        op!("00000111W0aaaaaa00dddddd", "movem P:ea <-> R", |T, opc| MovemAa { addr: tmpl_addr(T, opc), numreg: tmpl_reg(T, b'd', opc), w: tmpl_w(T, opc) }),
+        op!("00000111W0aaaaaa00dddddd", "movem P:aa <-> R", |T, opc| MovemAa { addr: tmpl_addr(T, opc), numreg: tmpl_reg(T, b'd', opc), w: tmpl_w(T, opc) }),
         op!("0000100sW1MMMRRR1Spppppp", "movep [X or Y]:ea <-> [X or Y]:pp", |T, opc| Movep23 { pp_offset: tmpl_pp(T, opc), ea_mode: tmpl_ea(T, opc), w: tmpl_w(T, opc), perspace: tmpl_space(T, b's', opc), easpace: tmpl_space(T, b'S', opc) }),
         op!("00000111W1MMMRRR0Sqqqqqq", "movep [X or Y]:ea <-> X:qq", |T, opc| MovepQq { qq_offset: tmpl_qq(T, opc), ea_mode: tmpl_ea(T, opc), w: tmpl_w(T, opc), qqspace: MemSpace::X, easpace: tmpl_space(T, b'S', opc) }),
         op!("00000111W0MMMRRR1Sqqqqqq", "movep [X or Y]:ea <-> Y:qq", |T, opc| MovepQq { qq_offset: tmpl_qq(T, opc), ea_mode: tmpl_ea(T, opc), w: tmpl_w(T, opc), qqspace: MemSpace::Y, easpace: tmpl_space(T, b'S', opc) }),
