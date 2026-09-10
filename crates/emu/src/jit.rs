@@ -384,6 +384,9 @@ impl JitEngine {
         {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
+            // Single-instruction functions are cached by opcode and reused
+            // at other addresses; fault shadow budgets are opcode
+            // properties (no PC involved), so this is cache-safe.
             emitter.emit_instruction(inst, pc, next_word);
             let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
             emitter.finalize_and_return(frontend_config);
@@ -485,6 +488,33 @@ impl DspState {
 
         let (func, inst_len) =
             jit.get_or_compile_instruction(self.pc, opcode, next_word, &self.map);
+
+        // Armed core fault: instructions execute while the remaining
+        // stream-word budget lasts (branches followed - a jmp in the
+        // window executes and the stream continues at its target); the
+        // first instruction that would exceed the budget is annulled and
+        // becomes the frame's saved PC (silicon-probed,
+        // VBA-redirect latency/straddle/branch-class probes).
+        if self.interrupts.state == InterruptState::Armed {
+            let remaining = self.interrupts.fault_budget;
+            if inst_len == 0 || inst_len > remaining {
+                self.deliver_armed_fault();
+                // Do NOT run process_pending_interrupts here: delivery
+                // already did the stage-4 work (saved PC, vector fetch,
+                // long detection) and set stage 3. An extra pipeline
+                // tick before the first vector word executes desyncs the
+                // fast-vector case: stage 2's saved-PC restore then
+                // checks at vector+1 instead of vector+2 and never
+                // fires, so execution falls off the end of the vector
+                // (silicon: a fast-vectored fault executes exactly the
+                // two vector words and resumes at the annulled address,
+                // probe_se_fastvec).
+                self.cycle_count += 2;
+                return 2;
+            }
+            self.interrupts.fault_budget = remaining - inst_len;
+        }
+
         self.pc_advance = inst_len;
 
         let consumed = unsafe { func(self as *mut DspState) };

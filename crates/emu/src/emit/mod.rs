@@ -60,6 +60,8 @@ const OFF_PC_ADVANCE: i32 = offset_of!(DspState, pc_advance) as i32;
 const OFF_INTERRUPT_STATE: i32 = offset_of!(DspState, interrupts.state) as i32;
 
 const OFF_INTERRUPT_PENDING_BITS: i32 = offset_of!(DspState, interrupts.pending_bits) as i32;
+const OFF_FAULT_BUDGET_HINT: i32 = offset_of!(DspState, fault_budget_hint) as i32;
+const OFF_INTERRUPT_FAULT_BUDGET: i32 = offset_of!(DspState, interrupts.fault_budget) as i32;
 
 /// Registers promoted to Cranelift i32 Variables for the duration of a block.
 /// Accumulator sub-registers (A0/A1/A2/B0/B1/B2) are promoted separately as
@@ -289,6 +291,19 @@ impl PendingFlags {
     }
 }
 
+/// Stack-error fault class for shadow-budget spills; selects the
+/// silicon-probed stream-word budget (see `INVALID_FAULT_BUDGET`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FaultClass {
+    /// Register-destination pop or in-place SSH write (budget 6, +1 for
+    /// memory destinations via `fault_anchor_bump`).
+    Pop,
+    /// Push overflow (budget 9 - len).
+    Push,
+    /// SP write that can set the SE bit (budget 6 - len).
+    SpWrite,
+}
+
 /// Cranelift IR emitter for DSP56300 instructions.
 pub struct Emitter<'a> {
     builder: FunctionBuilder<'a>,
@@ -319,6 +334,22 @@ pub struct Emitter<'a> {
     /// materialize the previous instruction's computation before it may
     /// redefine the variable — see `set_pending`.
     pending_sm_marker: Option<Value>,
+    /// PC of the instruction currently being emitted.
+    cur_inst_pc: u32,
+    /// Compile-time mirror of the current instruction's word count
+    /// (tracks `set_inst_len`); branches reset it to 0 for PC handling.
+    cur_inst_len: u32,
+    /// Decoded word count of the instruction currently being emitted
+    /// (set at `emit_instruction` entry, never zeroed by branches); used
+    /// to compute fault shadow budgets, which are opcode properties and
+    /// therefore safe in the opcode-cached single-instruction path.
+    cur_decode_len: u32,
+    /// Extra shadow-budget words for the current instruction:
+    /// memory-destination SSH pops read the stack one pipeline stage later
+    /// than register-destination pops (silicon: movec ssh,x:aa delivers at
+    /// start+8 vs start+7 for movec ssh,rN). Set around the affected
+    /// read, reset to 0 afterwards.
+    fault_anchor_bump: u32,
 }
 
 impl<'a> Emitter<'a> {
@@ -402,11 +433,49 @@ impl<'a> Emitter<'a> {
             sm_needs_sat_var,
             pending_flags: None,
             pending_sm_marker: None,
+            cur_inst_pc: 0,
+            cur_inst_len: 0,
+            cur_decode_len: 1,
+            fault_anchor_bump: 0,
         }
+    }
+
+    /// Spill the fault shadow BUDGET for the instruction being emitted to
+    /// `DspState::fault_budget_hint`, so a stack-error post inside the
+    /// upcoming helper call can record it. Budgets are stream words
+    /// allowed to execute after the faulting instruction (see
+    /// `INVALID_FAULT_BUDGET` in core.rs for the silicon-probed values);
+    /// they are compile-time constants derived from the opcode alone, so
+    /// the opcode-cached single-instruction path needs no runtime PC.
+    pub(super) fn emit_spill_fault_budget(&mut self, class: FaultClass) {
+        let words: u32 = match class {
+            FaultClass::Pop => 6 + self.fault_anchor_bump,
+            FaultClass::Push => 9u32.saturating_sub(self.cur_decode_len.max(1)),
+            FaultClass::SpWrite => 6u32.saturating_sub(self.cur_decode_len.max(1)),
+        };
+        let v = self.builder.ins().iconst(types::I32, words as i64);
+        self.builder
+            .ins()
+            .store(Self::flags(), v, self.state_ptr, OFF_FAULT_BUDGET_HINT);
+    }
+
+    /// Store a stream-word fault budget directly into the interrupt
+    /// pipeline (`interrupts.fault_budget`), arming the Armed shadow
+    /// model for inline posting paths that call no helper.
+    pub(super) fn emit_arm_fault_budget(&mut self, words: u32) {
+        let bv = self.builder.ins().iconst(types::I32, words as i64);
+        self.builder.ins().store(
+            Self::flags(),
+            bv,
+            self.state_ptr,
+            OFF_INTERRUPT_FAULT_BUDGET,
+        );
     }
 
     /// Emit IR for a single decoded instruction.
     pub fn emit_instruction(&mut self, inst: &Instruction, pc: u32, next_word: u32) {
+        self.cur_inst_pc = pc;
+        self.cur_decode_len = decode::instruction_length(inst);
         match inst {
             Instruction::Nop => self.emit_nop(),
             Instruction::AddImm { imm, d } => self.emit_add_imm(*imm, *d),
@@ -1233,7 +1302,38 @@ impl<'a> Emitter<'a> {
 
     /// Returns true if the instruction is a block terminator (branches,
     /// loops, wait, or anything that disrupts sequential control flow).
+    /// Instructions that can post a stack-error core fault at runtime
+    /// (SSH pops/pushes, SSH in-place writes, SP writes). These terminate
+    /// basic blocks so the run loop sees the pending fault at instruction
+    /// granularity and the Armed shadow-delivery model (stream-word
+    /// budgets, silicon-probed) stays exact in block mode. Known gap:
+    /// SSH ops inside inline REP bodies don't split blocks (corpus
+    /// authoring keeps fault shapes out of loop bodies).
+    fn is_stack_fault_capable(inst: &Instruction) -> bool {
+        let ssh_or_sp = |r: u8| r as usize == reg::SSH || r as usize == reg::SP;
+        match inst {
+            Instruction::BtstReg { reg_idx, .. }
+            | Instruction::BsetReg { reg_idx, .. }
+            | Instruction::BchgReg { reg_idx, .. }
+            | Instruction::BclrReg { reg_idx, .. } => ssh_or_sp(*reg_idx),
+            Instruction::MovecImm { dest, .. } => ssh_or_sp(*dest),
+            Instruction::MovecReg {
+                src_reg, dst_reg, ..
+            } => ssh_or_sp(*src_reg) || ssh_or_sp(*dst_reg),
+            Instruction::MovecEa { numreg, .. } | Instruction::MovecAa { numreg, .. } => {
+                ssh_or_sp(*numreg)
+            }
+            Instruction::MovemEa { numreg, .. } | Instruction::MovemAa { numreg, .. } => {
+                ssh_or_sp(*numreg)
+            }
+            _ => false,
+        }
+    }
+
     fn is_block_terminator(inst: &Instruction) -> bool {
+        if Self::is_stack_fault_capable(inst) {
+            return true;
+        }
         matches!(
             inst,
             Instruction::Jmp { .. }
@@ -1546,6 +1646,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn set_inst_len(&mut self, len: u32) {
+        self.cur_inst_len = len;
         let v = self.builder.ins().iconst(types::I32, len as i64);
         self.builder.def_var(self.inst_len, v);
     }
@@ -1616,7 +1717,7 @@ impl<'a> Emitter<'a> {
         self.builder.ins().iadd(self.state_ptr, slot_off)
     }
 
-    fn stack_push(&mut self, ssh_val: Value, ssl_val: Value) {
+    fn stack_push(&mut self, ssh_val: Value, ssl_val: Value, fault_budget: u32) {
         let sp = self.load_reg(reg::SP);
         let c0x10 = self.builder.ins().iconst(types::I32, 0x10); // SE bit
         let c0x20 = self.builder.ins().iconst(types::I32, 0x20); // UF bit
@@ -1646,6 +1747,13 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(error_blk);
         self.builder.seal_block(error_blk);
         self.emit_add_interrupt(interrupt::STACK_ERROR);
+        // Arm the shadow model with the caller-selected stream-word
+        // budget (push classes are per-opcode: JSR-family 9 - len flat,
+        // DO push-overflow 3 = silicon start+5 after the 2-word DO,
+        // probe_do_overflow). Stored directly into the
+        // interrupt pipeline since this inline path posts without a
+        // helper call.
+        self.emit_arm_fault_budget(fault_budget);
         self.builder.ins().jump(cont_blk, &[]);
 
         self.builder.switch_to_block(cont_blk);
@@ -1691,7 +1799,7 @@ impl<'a> Emitter<'a> {
         self.store_reg(reg::SSL, ssl_val);
     }
 
-    fn stack_pop(&mut self) -> (Value, Value) {
+    fn stack_pop(&mut self, fault_budget: u32) -> (Value, Value) {
         let sp = self.load_reg(reg::SP);
         let c0x10 = self.builder.ins().iconst(types::I32, 0x10);
         let c0x20 = self.builder.ins().iconst(types::I32, 0x20);
@@ -1735,6 +1843,11 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(error_blk);
         self.builder.seal_block(error_blk);
         self.emit_add_interrupt(interrupt::STACK_ERROR);
+        // Arm the shadow model with the caller-selected stream-word
+        // budget (pop classes are per-opcode: RTS/RTI 3 - len, ENDDO 5
+        // = silicon start+6 flat with the frame landing in slot 15,
+        // probe_enddo_underflow).
+        self.emit_arm_fault_budget(fault_budget);
         self.builder.ins().jump(cont_blk, &[]);
 
         self.builder.switch_to_block(cont_blk);
@@ -2017,7 +2130,11 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(normal_blk);
         self.builder.seal_block(normal_blk);
         let sr_val = self.load_reg(reg::SR);
-        self.stack_push(ret_addr, sr_val);
+        // JSR/BSR-family push-overflow budget: 9 - len stream words
+        // (silicon flat start+9; the branch completes and the target
+        // words count).
+        let budget = 9u32.saturating_sub(self.cur_decode_len.max(1));
+        self.stack_push(ret_addr, sr_val, budget);
         self.end_conditional_arm(&mut cond_state);
         self.builder.ins().jump(merge_blk, &[]);
 

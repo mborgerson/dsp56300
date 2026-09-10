@@ -397,6 +397,39 @@ impl<'a> Emitter<'a> {
         let forever = matches!(do_inst, Instruction::DoForever | Instruction::DorForever);
         self.emit_do_setup(la_val, lc_val, do_pc + 2, forever);
 
+        // The DO header pushes can post a stack-error core fault
+        // (overflow at SP=15) with an armed stream-word budget. An
+        // inline loop cannot honor the Armed model's word-granular
+        // annulment mid-block, so bail out to the run loop before the
+        // body executes, resuming at the body's first instruction -
+        // step-mode delivery then counts the silicon budget from there
+        // (probe_do_overflow block-mode divergence).
+        // Mirrors emit_loop_budget_check's bail mechanics.
+        self.flush_pending_cycles();
+        let fb = self.builder.ins().load(
+            types::I32,
+            Self::flags(),
+            self.state_ptr,
+            OFF_INTERRUPT_FAULT_BUDGET,
+        );
+        // INVALID_FAULT_BUDGET == 0xFFFF_FFFF == -1 as i32.
+        let invalid = self.builder.ins().iconst(types::I32, -1);
+        let faulted = self.builder.ins().icmp(IntCC::NotEqual, fb, invalid);
+        let fault_bail = self.builder.create_block();
+        let no_fault = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(faulted, fault_bail, &[], no_fault, &[]);
+        self.builder.switch_to_block(fault_bail);
+        self.builder.seal_block(fault_bail);
+        self.flush_all_to_memory();
+        let resume = self.builder.ins().iconst(types::I32, (do_pc + 2) as i64);
+        self.store_pc(resume);
+        let ret = self.builder.use_var(self.total_cycles);
+        self.builder.ins().return_(&[ret]);
+        self.builder.switch_to_block(no_fault);
+        self.builder.seal_block(no_fault);
+
         // 2. Create Cranelift loop with deferred pre-loop block.
         let pre_loop = self.builder.create_block();
         let loop_header = self.builder.create_block();
@@ -570,7 +603,12 @@ impl<'a> Emitter<'a> {
 
     /// ENDDO cleanup: pop (PC, SR), restore LF+FV from saved SR, pop (LA, LC).
     pub(super) fn emit_enddo_cleanup(&mut self) {
-        let (_saved_pc, saved_sr) = self.stack_pop();
+        // ENDDO pop-underflow budget: 5 stream words after the 1-word
+        // ENDDO (silicon delivers at start+6 flat; the double pop takes
+        // SP $00->$3F->$3E and the dispatch frame lands in slot 15,
+        // probe_enddo_underflow). DO-annul pops share this
+        // path; their budget is extrapolated from ENDDO (unprobed).
+        let (_saved_pc, saved_sr) = self.stack_pop(5);
         let sr_val = self.load_reg(reg::SR);
         let lf_fv_mask = (1u32 << sr::LF) | (1u32 << sr::FV);
         let mask = self.builder.ins().iconst(types::I32, lf_fv_mask as i64);
@@ -579,7 +617,7 @@ impl<'a> Emitter<'a> {
         let saved_flags = self.builder.ins().band(saved_sr, mask);
         let sr_new = self.builder.ins().bor(sr_without, saved_flags);
         self.store_reg(reg::SR, sr_new);
-        let (la, lc) = self.stack_pop();
+        let (la, lc) = self.stack_pop(5);
         self.store_reg(reg::LA, la);
         self.store_reg(reg::LC, lc);
     }
@@ -604,14 +642,19 @@ impl<'a> Emitter<'a> {
     ) {
         let old_la = self.load_reg(reg::LA);
         let old_lc = self.load_reg(reg::LC);
-        self.stack_push(old_la, old_lc);
+        // DO push-overflow budget: 3 stream words after the 2-word DO
+        // (silicon delivers at start+5, probe_do_overflow -
+        // NOT the JSR push class's 9 - len). The second push normally
+        // faults under the first's SE latch; if it faults alone the
+        // same class budget is assumed.
+        self.stack_push(old_la, old_lc, 3);
         self.store_reg(reg::LA, la_val);
         let ret = self
             .builder
             .ins()
             .iconst(types::I32, mask_pc(ret_pc) as i64);
         let sr_val = self.load_reg(reg::SR);
-        self.stack_push(ret, sr_val);
+        self.stack_push(ret, sr_val, 3);
         let sr_new = if forever {
             let flags = (1u32 << sr::LF) | (1u32 << sr::FV);
             let flag_bits = self.builder.ins().iconst(types::I32, flags as i64);

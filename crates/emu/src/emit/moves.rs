@@ -203,8 +203,11 @@ impl<'a> Emitter<'a> {
                 self.write_reg_for_move(dst_reg, val);
             }
         } else {
-            // Write control register -> memory
+            // Write control register -> memory. A memory-destination SSH
+            // pop anchors its fault one word later than a register pop.
+            self.fault_anchor_bump = 1;
             let val = self.read_reg_for_move(dst_reg);
+            self.fault_anchor_bump = 0;
             self.write_mem_dyn(space, addr, val);
         }
     }
@@ -220,8 +223,12 @@ impl<'a> Emitter<'a> {
             let val = self.read_mem(space, addr);
             self.write_reg_for_move(dst_reg, val);
         } else {
-            // Write control register -> absolute address
+            // Write control register -> absolute address. A memory-
+            // destination SSH pop anchors its fault one word later than a
+            // register pop (silicon: movec ssh,x:aa delivers at start+8).
+            self.fault_anchor_bump = 1;
             let val = self.read_reg_for_move(dst_reg);
+            self.fault_anchor_bump = 0;
             self.write_mem(space, addr, val);
         }
     }
@@ -238,8 +245,11 @@ impl<'a> Emitter<'a> {
             let val = self.read_mem_dyn(MemSpace::P, addr);
             self.write_reg_for_move(numreg, val);
         } else {
-            // Write register -> P memory
+            // Write register -> P memory (memory-destination SSH pops
+            // anchor one word later; see emit_spill_fault_anchor).
+            self.fault_anchor_bump = 1;
             let val = self.read_reg_for_move(numreg);
+            self.fault_anchor_bump = 0;
             self.write_mem_dyn(MemSpace::P, addr, val);
         }
     }
@@ -255,8 +265,11 @@ impl<'a> Emitter<'a> {
             let val = self.read_mem_dyn(MemSpace::P, addr_val);
             self.write_reg_for_move(numreg, val);
         } else {
-            // Write register -> P:addr
+            // Write register -> P:addr (memory-destination SSH pops
+            // anchor one word later; see emit_spill_fault_anchor).
+            self.fault_anchor_bump = 1;
             let val = self.read_reg_for_move(numreg);
+            self.fault_anchor_bump = 0;
             self.write_mem_dyn(MemSpace::P, addr_val, val);
         }
     }

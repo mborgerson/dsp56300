@@ -174,13 +174,42 @@ pub enum InterruptState {
     Fast = 1,
     /// Long interrupt: JSR detected at vector, context stacked.
     Long = 2,
+    /// Core fault armed with a known shadow word budget: instructions
+    /// keep executing while the remaining budget lasts; the first
+    /// instruction that would exceed it is annulled and becomes the
+    /// exception frame's saved PC (silicon-probed).
+    Armed = 3,
 }
+
+/// Sentinel for "no fault shadow budget recorded".
+///
+/// Shadow budgets are counted in FETCH-STREAM WORDS remaining after the
+/// faulting instruction, following branches: a branch inside the window
+/// executes, consumes its word count, and the stream continues at its
+/// target (silicon-probed, VBA-redirect probe rounds 1-5).
+/// Per-class budgets, in words after the faulting instruction of length
+/// `len` (equivalently: silicon delivers at start+len+6 for register
+/// pops, start+len+7 for memory-destination pops, start+9 flat for
+/// pushes, start+6 flat for SE-bit SP writes, start+3 for RTS/RTI):
+/// - register-destination pops / in-place SSH writes: 6
+/// - memory-destination pops: 7
+/// - push overflow (incl. JSR-family; target words count): 9 - len
+/// - SP writes that set the SE bit: 6 - len (UF-only writes don't fault;
+///   bit-op SP writes behave exactly like movec forms - bset #4,sp
+///   faults with this class, bset #5,sp (UF) doesn't, probe_sp_bset_se4)
+/// - RTS/RTI underflow (the branch to slot-0 storage executes): 3 - len
+/// - DO push overflow: 3 (silicon start+5 after the 2-word DO; the
+///   overflowing push itself wraps and LANDS in slot 0, like JSR's)
+/// - ENDDO pop underflow: 5 (silicon start+6 flat; the double pop takes
+///   SP $00->$3F->$3E and the dispatch frame lands in slot 15)
+pub const INVALID_FAULT_BUDGET: u32 = 0xFFFF_FFFF;
 
 impl From<u8> for InterruptState {
     fn from(v: u8) -> Self {
         match v {
             1 => Self::Fast,
             2 => Self::Long,
+            3 => Self::Armed,
             _ => Self::None,
         }
     }
@@ -192,6 +221,7 @@ impl std::fmt::Display for InterruptState {
             Self::None => f.write_str("none"),
             Self::Fast => f.write_str("fast"),
             Self::Long => f.write_str("long"),
+            Self::Armed => f.write_str("armed"),
         }
     }
 }
@@ -209,6 +239,11 @@ pub struct InterruptPipeline {
     pub saved_pc: u32,
     pub ipl: [i8; interrupt::COUNT],
     pub ipl_to_raise: u8,
+    /// Remaining shadow word budget of the pending core fault (stream
+    /// words that may still execute before delivery; see
+    /// `INVALID_FAULT_BUDGET` docs for per-class values). Enables the
+    /// Armed shadow model; `INVALID_FAULT_BUDGET` when unknown.
+    pub fault_budget: u32,
 }
 
 impl Default for InterruptPipeline {
@@ -233,6 +268,7 @@ impl InterruptPipeline {
             saved_pc: 0xFFFF,
             ipl,
             ipl_to_raise: 0,
+            fault_budget: INVALID_FAULT_BUDGET,
         }
     }
 
@@ -420,6 +456,12 @@ pub struct DspState {
     /// executing block to return to the run loop (e.g. halt_requested was
     /// set by a peripheral callback). Cleared by the run loop after each block.
     pub exit_requested: bool,
+    /// Shadow word budget of the instruction currently executing, spilled
+    /// by JIT code immediately before calls that can post a core fault
+    /// (stack errors). Consumed as `InterruptPipeline::fault_budget` when
+    /// a fault is posted. `INVALID_FAULT_BUDGET` when unknown (e.g.
+    /// direct helper calls in tests).
+    pub fault_budget_hint: u32,
     /// Power state (WAIT/STOP). Set by WAIT/STOP instructions, checked by
     /// the run loop. WAIT is cleared on unmasked interrupt; STOP requires
     /// external RESET.
@@ -462,6 +504,7 @@ impl DspState {
             cycle_budget: 0,
             halt_requested: false,
             exit_requested: false,
+            fault_budget_hint: INVALID_FAULT_BUDGET,
             power_state: PowerState::Normal,
             interrupts: InterruptPipeline::new(),
             pram_dirty: PramDirtyBitmap::new(map.p_space_end() as usize),
@@ -481,6 +524,8 @@ impl DspState {
         // Detect overflow: stack pointer bit 4 becomes set, no prior error
         if stack_error == 0 && (stack & (1 << 4)) != 0 {
             self.interrupts.add(interrupt::STACK_ERROR);
+            self.interrupts.fault_budget = self.fault_budget_hint;
+            self.fault_budget_hint = INVALID_FAULT_BUDGET;
         }
 
         self.registers[reg::SP] = (underflow | stack_error | stack) & 0x3F;
@@ -506,6 +551,8 @@ impl DspState {
         // Detect underflow: stack pointer bit 4 becomes set, no prior error
         if stack_error == 0 && (stack & (1 << 4)) != 0 {
             self.interrupts.add(interrupt::STACK_ERROR);
+            self.interrupts.fault_budget = self.fault_budget_hint;
+            self.fault_budget_hint = INVALID_FAULT_BUDGET;
         }
 
         self.registers[reg::SP] = (underflow | stack_error | stack) & 0x3F;
@@ -701,6 +748,12 @@ impl DspState {
             }
         }
 
+        // An armed core fault owns the window until delivery; don't
+        // re-arbitrate over it.
+        if self.interrupts.state == InterruptState::Armed {
+            return;
+        }
+
         if !self.interrupts.has_pending() {
             return;
         }
@@ -739,9 +792,32 @@ impl DspState {
         // Vector address = VBA[23:8] | slot_offset[7:0] (per Section 5.4.4.4)
         let vba = self.registers[reg::VBA] & 0xFFFF00;
         self.interrupts.vector_addr = vba | interrupt::vector_addr(idx) as u32;
-        self.interrupts.pipeline_stage = 5;
-        self.interrupts.state = InterruptState::Fast;
         self.interrupts.ipl_to_raise = new_ipl as u8;
+        if idx == interrupt::STACK_ERROR && self.interrupts.fault_budget != INVALID_FAULT_BUDGET {
+            // Silicon-probed shadow model: keep executing while the
+            // remaining stream-word budget lasts, then annul and vector
+            // (deliver_armed_fault, called from the step loop where the
+            // next instruction's length is known).
+            self.interrupts.state = InterruptState::Armed;
+        } else {
+            self.interrupts.pipeline_stage = 5;
+            self.interrupts.state = InterruptState::Fast;
+        }
+    }
+
+    /// Deliver an Armed core fault: annul the instruction at the current PC
+    /// (it becomes the exception frame's saved PC) and start vector fetch.
+    /// Mirrors the Fast pipeline's stage-4 body; stages 3..0 then run as
+    /// usual via `process_pending_interrupts`.
+    pub fn deliver_armed_fault(&mut self) {
+        self.interrupts.saved_pc = self.pc;
+        self.pc = self.interrupts.vector_addr;
+        self.interrupts.state = InterruptState::Fast;
+        self.interrupts.fault_budget = INVALID_FAULT_BUDGET;
+
+        let instr = self.read_memory(MemSpace::P, self.pc);
+        self.detect_long_interrupt(instr);
+        self.interrupts.pipeline_stage = 3;
     }
 
     /// Detect whether the instruction at the interrupt vector is a long
@@ -983,6 +1059,8 @@ pub unsafe extern "C" fn jit_write_ssh(state: *mut DspState, value: u32) {
 
     if stack_error == 0 && (stack & (1 << 4)) != 0 {
         state.interrupts.add(interrupt::STACK_ERROR);
+        state.interrupts.fault_budget = state.fault_budget_hint;
+        state.fault_budget_hint = INVALID_FAULT_BUDGET;
     }
 
     state.registers[reg::SP] = (underflow | stack_error | stack) & 0x3F;
@@ -1010,16 +1088,27 @@ pub unsafe extern "C" fn jit_read_ssh(state: *mut DspState) -> u32 {
 /// Write SSH in place: modify the top stack slot without touching SP.
 /// Used by the bit-modifying ops (BSET/BCLR/BCHG on SSH), which
 /// hardware-verifiably rewrite the top entry rather than pushing.
-/// At sp=0 silicon wedges on these ops (probe); we keep
-/// the historical skip-slot-0 behavior and continue benignly.
+///
+/// At sp=0 the operation is a STACK ERROR on silicon (VBA-redirect
+/// probe): SP goes $00 -> $30 (UF|SE set, nibble untouched,
+/// no push), a stack-error exception is raised, and the exception
+/// frame lands in slot 1. Whether the slot-0 write itself lands is
+/// not yet observable; we keep the skip until a probe pins it.
 ///
 /// # Safety
 /// `state` must be a valid pointer to a `DspState`.
 pub unsafe extern "C" fn jit_write_ssh_tos(state: *mut DspState, value: u32) {
     let state = unsafe { &mut *state };
-    let idx = (state.registers[reg::SP] & 0xF) as usize;
+    let sp = state.registers[reg::SP];
+    let idx = (sp & 0xF) as usize;
     if idx != 0 {
         state.stack[0][idx] = value & REG_MASKS[reg::SSH];
+    } else {
+        if sp & (1 << 4) == 0 {
+            state.interrupts.add(interrupt::STACK_ERROR);
+            state.interrupts.fault_budget = state.fault_budget_hint;
+        }
+        state.registers[reg::SP] = (sp | (1 << 5) | (1 << 4)) & 0x3F;
     }
     state.registers[reg::SSH] = state.stack[0][idx];
 }
@@ -1047,9 +1136,16 @@ pub unsafe extern "C" fn jit_write_ssl(state: *mut DspState, value: u32) {
 pub unsafe extern "C" fn jit_write_sp(state: *mut DspState, value: u32) {
     let state = unsafe { &mut *state };
     let mask = REG_MASKS[reg::SP];
+    // Writing the SE bit into SP is itself a stack error (silicon,
+    // probe_irq_sp_write_se/_2w: boundary = write start + 6
+    // words flat). A UF-only write does NOT fault at the write; the
+    // poisoned SP faults on the next stack operation instead
+    // (probe_irq_sp_write_uf).
     let stack_error = state.registers[reg::SP] & (3 << 4);
-    if stack_error == 0 && (value & (3 << 4)) != 0 {
+    if stack_error == 0 && (value & (1 << 4)) != 0 {
         state.interrupts.add(interrupt::STACK_ERROR);
+        state.interrupts.fault_budget = state.fault_budget_hint;
+        state.fault_budget_hint = INVALID_FAULT_BUDGET;
     }
     state.registers[reg::SP] = value & mask;
     // Recompute SSH/SSL from the current stack[SP] position.

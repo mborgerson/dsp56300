@@ -471,13 +471,24 @@ fn test_movec_ssh_overflow() {
     assert_eq!(s.registers[reg::SP] & 0xF, 15);
     assert!(!s.interrupts.pending(interrupt::STACK_ERROR));
 
-    // 16th push -> overflow -> STACK_ERROR dispatched by postexecute_interrupts
+    // 16th push -> overflow -> STACK_ERROR armed with the silicon shadow
+    // model (stream-word budgets, VBA-redirect probes)
     run_one(&mut s, &mut jit);
-    // Interrupt was dispatched (is_pending cleared, pipeline started)
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
     assert_eq!(s.interrupts.vector_addr, 0x02); // STACK_ERROR vector
+    // Push-overflow budget = 9 - len(1) = 8 stream words after the
+    // faulting push (silicon: 1w and 2w overflow deliver at start+9)
+    assert_eq!(s.interrupts.fault_budget, 8);
     // SE bit (bit 4) should be set in SP
     assert_ne!(s.registers[reg::SP] & (1 << 4), 0);
+
+    // The shadow window: 8 NOPs (pc 16..23) execute; the instruction at
+    // 24 exceeds the budget, is annulled, and becomes the saved PC.
+    for _ in 0..9 {
+        run_one(&mut s, &mut jit);
+    }
+    assert_eq!(s.interrupts.saved_pc, 24);
+    assert_ne!(s.interrupts.state, InterruptState::Armed);
 }
 
 #[test]
@@ -496,11 +507,22 @@ fn test_movec_sp_overflow_value() {
     // movec X0,SP = 0x04C4BB
     pram[0] = 0x04C4BB;
     run_one(&mut s, &mut jit);
-    // STACK_ERROR dispatched by postexecute_interrupts
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
+    // STACK_ERROR armed with the silicon shadow model (fault at pc 0)
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
     assert_eq!(s.interrupts.vector_addr, 0x02); // STACK_ERROR vector
+    // SE-bit SP write: budget = 6 - len(1) = 5 stream words
+    // (silicon: start+6 flat, probe_irq_sp_write_se/_2w)
+    assert_eq!(s.interrupts.fault_budget, 5);
     // SP should have the error bits set
     assert_ne!(s.registers[reg::SP] & (1 << 4), 0);
+
+    // Shadow window: 5 NOPs (pc 1..5) execute; the instruction at 6
+    // exceeds the budget, is annulled, and becomes the saved PC.
+    for _ in 0..7 {
+        run_one(&mut s, &mut jit);
+    }
+    assert_eq!(s.interrupts.saved_pc, 6);
+    assert_ne!(s.interrupts.state, InterruptState::Armed);
 }
 
 #[test]
@@ -1537,12 +1559,12 @@ fn test_stack_overflow_posts_interrupt() {
         "SP SE bit should be set after overflow; SP = {:#04X}",
         sp
     );
-    // STACK_ERROR interrupt should have been dispatched (process_pending_interrupts
-    // clears pending bit and moves to pipeline - check that it entered the pipeline)
+    // STACK_ERROR should have been dispatched; JSR overflow arms the
+    // silicon shadow model (stream-word budget, branch completed).
     assert_eq!(
         s.interrupts.state,
-        InterruptState::Fast,
-        "STACK_ERROR interrupt should have entered pipeline after overflow"
+        InterruptState::Armed,
+        "STACK_ERROR should be Armed after overflow"
     );
 }
 
@@ -1573,11 +1595,14 @@ fn test_stack_underflow_posts_interrupt() {
         "SP SE bit should be set after underflow; SP = {:#04X}",
         sp
     );
+    // RTS underflow arms the shadow model (budget 3 - len = 2: the
+    // branch to slot-0 storage executed, 2 more stream words follow).
     assert_eq!(
         s.interrupts.state,
-        InterruptState::Fast,
-        "STACK_ERROR interrupt should have entered pipeline after underflow"
+        InterruptState::Armed,
+        "STACK_ERROR should be Armed after underflow"
     );
+    assert_eq!(s.interrupts.fault_budget, 2);
 }
 
 #[test]

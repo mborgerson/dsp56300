@@ -107,14 +107,18 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_rts(&mut self) {
         self.set_inst_len(0);
         self.set_cycles(3);
-        let (ssh, _ssl) = self.stack_pop();
+        // RTS/RTI underflow budget: 3 - len (silicon: the branch to
+        // slot-0 storage executes, then 2 more stream words).
+        let budget = 3u32.saturating_sub(self.cur_decode_len.max(1));
+        let (ssh, _ssl) = self.stack_pop(budget);
         self.store_pc(ssh);
     }
 
     pub(super) fn emit_rti(&mut self) {
         self.set_inst_len(0);
         self.set_cycles(3);
-        let (ssh, ssl) = self.stack_pop();
+        let budget = 3u32.saturating_sub(self.cur_decode_len.max(1));
+        let (ssh, ssl) = self.stack_pop(budget);
         self.store_pc(ssh);
         self.store_reg(reg::SR, ssl);
     }
@@ -637,6 +641,7 @@ impl<'a> Emitter<'a> {
                     // (hardware-verified for the jump, jump-subroutine,
                     // branch, and branch-subroutine variants alike; the
                     // manual documents only the BR*/BS* forms).
+                    self.emit_spill_fault_budget(FaultClass::Pop);
                     self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
                 } else {
                     // Plain register access - no move side effects.
