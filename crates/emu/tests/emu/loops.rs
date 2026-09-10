@@ -2828,3 +2828,122 @@ fn test_out_of_range_extension_byte_does_not_leak_into_carry() {
         "bits above the 8-bit extension byte reached the carry"
     );
 }
+
+/// Step-vs-block differential for one DO #4 loop body: the block path
+/// (inline loop, backedge E/U/N/Z deferral and its hazard gate) against
+/// execute_one as the oracle. Anchors the dominated-SR-read rule: bodies
+/// where an SR read follows a full materialization defer, bodies where it
+/// precedes one must not.
+fn do_body_step_vs_block(body: &[u32]) -> ([u32; 64], [u32; 64]) {
+    let la = 1 + body.len() as u32;
+    let build = |pram: &mut [u32]| {
+        pram[0] = 0x060480; // DO #4,la
+        pram[1] = la;
+        for (i, &w) in body.iter().enumerate() {
+            pram[2 + i] = w;
+        }
+        let park = la as usize + 1;
+        pram[park] = 0x0C0000 | park as u32; // jmp park (spin after loop)
+    };
+    let seed = |s: &mut DspState| {
+        // Z=1 so a stale quarter is DISTINGUISHABLE: the first iteration's
+        // EQ-read legitimately sees Z=1, the mac clears it, and any
+        // wrongly-deferred body would keep handing later iterations the
+        // stale Z=1 (verified: the gated bodies fail when the back-edge
+        // flush is forced to drop the quarter, which is exactly that).
+        s.registers[reg::SR] = 0xC0_0304;
+        s.registers[reg::X0] = 0x000002;
+        s.registers[reg::Y0] = 0x000003;
+        s.registers[reg::A1] = 0x000006;
+        s.registers[reg::B1] = 0x123456;
+    };
+
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    build(&mut pram);
+    let mut jit1 = JitEngine::new(PRAM_SIZE);
+    let mut s1 = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    seed(&mut s1);
+    let mut guard = 0;
+    while s1.pc <= la {
+        s1.execute_one(&mut jit1);
+        guard += 1;
+        assert!(guard < 1000, "step path did not leave the loop");
+    }
+    let stepped = s1.registers;
+
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    build(&mut pram);
+    let mut jit2 = JitEngine::new(PRAM_SIZE);
+    let mut s2 = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    seed(&mut s2);
+    let mut guard = 0;
+    while s2.pc <= la {
+        s2.run(&mut jit2, 8);
+        guard += 1;
+        assert!(guard < 1000, "block path did not leave the loop");
+    }
+    (stepped, s2.registers)
+}
+
+fn assert_do_body_paths_agree(body: &[u32], what: &str) {
+    let (stepped, blocked) = do_body_step_vs_block(body);
+    for r in [
+        reg::SR,
+        reg::A1,
+        reg::A0,
+        reg::A2,
+        reg::B1,
+        reg::X1,
+        reg::LC,
+    ] {
+        assert_eq!(
+            stepped[r], blocked[r],
+            "{what}: reg[{r:#04x}] step={:#08x} block={:#08x}",
+            stepped[r], blocked[r]
+        );
+    }
+}
+
+#[test]
+fn test_do_body_dominated_cc_read_defers_soundly() {
+    // cmp materializes at Tcc.eq's own load, so the EQ read never sees the
+    // elided quarter - the body defers and must still match the oracle.
+    assert_do_body_paths_agree(
+        &[0x200045, 0x02A000, 0x200082], // cmp x0,a ; teq b,a ; mac x0,y0,a
+        "cmp;teq;mac",
+    );
+}
+
+#[test]
+fn test_do_body_undominated_cc_read_stays_gated() {
+    // Tcc.eq at the body top reads the PREVIOUS iteration's mac flags; a
+    // deferral would hand it a stale Z. The gate must keep this body
+    // materializing per iteration.
+    assert_do_body_paths_agree(
+        &[0x02A000, 0x200082], // teq b,a ; mac x0,y0,a
+        "teq;mac",
+    );
+}
+
+#[test]
+fn test_do_body_dominated_sr_escape_defers_soundly() {
+    // movec sr,x1 after cmp's materialization escapes a CURRENT quarter.
+    assert_do_body_paths_agree(
+        &[0x200045, 0x0445B9, 0x200082], // cmp x0,a ; movec sr,x1 ; mac x0,y0,a
+        "cmp;movec sr,x1;mac",
+    );
+}
+
+#[test]
+fn test_do_body_undominated_sr_escape_stays_gated() {
+    // movec sr,x1 at the body top escapes the previous iteration's flags;
+    // a deferral would leak the stale quarter into X1.
+    assert_do_body_paths_agree(
+        &[0x0445B9, 0x200082], // movec sr,x1 ; mac x0,y0,a
+        "movec sr,x1;mac",
+    );
+}

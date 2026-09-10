@@ -368,6 +368,18 @@ pub struct Emitter<'a> {
     /// emission-time panic - it would strand the carried computation on
     /// one arm of the conditional.
     pub(crate) cond_keep_flags: u32,
+    /// Emission-time dataflow flag: SR's E/U/N/Z bits are architecturally
+    /// current at this point of the body on every iteration - a full
+    /// quarter materialization was emitted at conditional depth 0 since
+    /// the innermost loop top. Reset at loop-body tops and after inner
+    /// loops (the backedge elision re-introduces staleness at each
+    /// iteration boundary, and an annulled inner loop skips its exit
+    /// materialization).
+    pub(crate) eunz_current: bool,
+    /// Depth of `begin_conditional`..`merge_conditional` regions. A
+    /// materialization inside an arm does not dominate the merge, so it
+    /// must not set `eunz_current`.
+    pub(crate) cond_depth: u32,
     /// Emission sites at which deferring flags across an inline DO's back
     /// edge would be unsound because the loop body observes SR or leaves
     /// JIT-compiled code mid-iteration: guest-visible SR reads (any
@@ -493,6 +505,8 @@ impl<'a> Emitter<'a> {
             sm_needs_sat_var,
             pending_flags: None,
             cond_keep_flags: 0,
+            eunz_current: false,
+            cond_depth: 0,
             defer_hazard_sites: 0,
             in_flag_flush: false,
             sr_read_transparent: false,
