@@ -3579,8 +3579,9 @@ fn test_jcc_cs_taken() {
 
 #[test]
 fn test_jcc_nn_taken() {
-    // NN (not normalized, CondCode::NN=4). NN = Z | !(U | E).
-    // Z=0, U=0, E=0 -> NN = 0 | !(0|0) = 1 -> taken.
+    // NN (not normalized, CondCode::NN=4). NN = !(Z | (!U & !E))
+    // (manual 12-18; hardware-verified).
+    // Z=0, U=0, E=1 -> NN = !(0 | (1&0)) = 1 -> taken.
     // CCCC=0100 (NN=4), addr=$100.
     // 0000_1110_0100_0001_0000_0000 = 0x0E4100
     let mut jit = JitEngine::new(PRAM_SIZE);
@@ -3588,10 +3589,10 @@ fn test_jcc_nn_taken() {
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-    s.registers[reg::SR] = 0;
+    s.registers[reg::SR] = 1 << sr::E;
     pram[0] = 0x0E4100; // jcc NN,$100
     run_one(&mut s, &mut jit);
-    assert_eq!(s.pc, 0x100, "NN: should be taken when Z=0, U=0, E=0");
+    assert_eq!(s.pc, 0x100, "NN: should be taken when Z=0, U=0, E=1");
 }
 
 #[test]
@@ -3746,8 +3747,9 @@ fn test_jset_ccr_unchanged() {
 
 #[test]
 fn test_jcc_nr_taken() {
-    // (remaining): NR (normalized, CondCode::NR=12). NR = Z | (!U & E).
-    // U=0, E=1 -> NR = 0 | (!0 & 1) = 1 -> taken.
+    // (remaining): NR (normalized, CondCode::NR=12). NR = Z | (!U & !E)
+    // (manual 12-18; hardware-verified).
+    // U=0, E=0 -> NR = 0 | (1 & 1) = 1 -> taken.
     // CCCC=1100 (NR=12), addr=$100.
     // 0000_1110_1100_0001_0000_0000 = 0x0EC100
     let mut jit = JitEngine::new(PRAM_SIZE);
@@ -3755,10 +3757,10 @@ fn test_jcc_nr_taken() {
     let mut yram = [0u32; YRAM_SIZE];
     let mut pram = [0u32; PRAM_SIZE];
     let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
-    s.registers[reg::SR] = 1 << sr::E; // E=1, U=0
+    s.registers[reg::SR] = 0; // E=0, U=0
     pram[0] = 0x0EC100; // jcc NR,$100
     run_one(&mut s, &mut jit);
-    assert_eq!(s.pc, 0x100, "NR: should be taken when E=1 and U=0");
+    assert_eq!(s.pc, 0x100, "NR: should be taken when E=0 and U=0");
 }
 
 #[test]
