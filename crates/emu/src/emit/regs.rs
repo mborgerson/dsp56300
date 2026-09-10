@@ -322,6 +322,13 @@ impl<'a> Emitter<'a> {
         self.promoted.acc_dirty[i] = true;
     }
 
+    /// Load a register word and mask it to its architectural width.
+    fn load_masked_u32(&mut self, offset: i32, mask: u32) -> Value {
+        let v = self.load_u32(offset);
+        let m = self.builder.ins().iconst(types::I32, mask as i64);
+        self.builder.ins().band(v, m)
+    }
+
     /// Pack three i32 sub-register values into a 56-bit i64 accumulator.
     pub(super) fn pack_acc(&mut self, a2: Value, a1: Value, a0: Value) -> Value {
         let v2 = self.builder.ins().uextend(types::I64, a2);
@@ -373,11 +380,20 @@ impl<'a> Emitter<'a> {
     }
 
     /// Load three i32 sub-registers from memory and pack into i64 Variable.
+    ///
+    /// The sub-registers are masked to their architectural widths on the way
+    /// in. Every path that writes them back masks already, so a running
+    /// program cannot put an out-of-range value there - but an embedder that
+    /// pokes `DspState::registers` directly can, and an over-wide extension
+    /// byte would land in bits 56+ of the packed accumulator, which is where
+    /// `update_vcl` reads the carry out of a subtraction. The carry flag
+    /// would then depend on how many instructions a block happened to
+    /// cover, since the first flush masks the register.
     pub(super) fn reload_acc(&mut self, acc: Accumulator) {
         let (r2, r1, r0) = Self::acc_regs(acc);
-        let v0 = self.load_u32(Self::reg_offset(r0));
-        let v1 = self.load_u32(Self::reg_offset(r1));
-        let v2 = self.load_u32(Self::reg_offset(r2));
+        let v0 = self.load_masked_u32(Self::reg_offset(r0), 0x00FF_FFFF);
+        let v1 = self.load_masked_u32(Self::reg_offset(r1), 0x00FF_FFFF);
+        let v2 = self.load_masked_u32(Self::reg_offset(r2), 0xFF);
         let packed = self.pack_acc(v2, v1, v0);
         let i = Self::acc_idx(acc);
         self.builder.def_var(self.promoted.acc[i], packed);
