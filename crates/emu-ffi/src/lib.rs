@@ -350,6 +350,8 @@ pub struct CJitStats {
     pub compile_ns: u64,
     pub invalidations: u64,
     pub cache_hits: u64,
+    pub retained: u64,
+    pub block_entries: u64,
 }
 
 /// Read the translation counters.
@@ -364,6 +366,8 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
         compile_ns,
         invalidations,
         cache_hits,
+        retained,
+        block_entries,
     } = dsp.jit.stats;
     unsafe {
         *out = CJitStats {
@@ -371,6 +375,8 @@ pub unsafe extern "C" fn dsp56300_get_jit_stats(dsp: *const DspJit, out: *mut CJ
             compile_ns,
             invalidations,
             cache_hits,
+            retained,
+            block_entries,
         };
     }
 }

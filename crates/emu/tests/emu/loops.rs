@@ -2710,10 +2710,14 @@ fn test_inline_loop_preemption_is_slice_independent() {
         (jit, out)
     }
 
-    let (_, whole) = run_it(CYCLES);
+    let (jit_whole, whole) = run_it(CYCLES);
     let (_, sliced) = run_it(1);
     assert_eq!(whole[0], 0x16, "loop must complete");
     assert_eq!(whole[1], CYCLES as u32, "exact cycle count");
     assert_eq!(whole[2 + reg::A0], 255 * 20, "exact iteration count");
     assert_eq!(whole, sliced, "slice size changed the result");
+    assert!(
+        jit_whole.stats.block_entries > 1,
+        "the loop was never preempted, so the invariant is untested"
+    );
 }
