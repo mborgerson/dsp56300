@@ -1190,6 +1190,9 @@ impl<'a> Emitter<'a> {
                 self.set_inst_len(1);
                 self.set_cycles(9);
                 self.emit_add_interrupt(interrupt::TRAP);
+                // Zero stream-word budget: saved PC = F+len (silicon,
+                // probe_trap_vector; vector VBA:$08).
+                self.emit_arm_fault_budget(0);
             }
             Instruction::Trapcc { cc } => {
                 self.set_inst_len(1);
@@ -1413,6 +1416,8 @@ impl<'a> Emitter<'a> {
                 | Instruction::Wait
                 | Instruction::Stop
                 | Instruction::Illegal
+                | Instruction::Trap
+                | Instruction::Trapcc { .. }
         )
     }
 

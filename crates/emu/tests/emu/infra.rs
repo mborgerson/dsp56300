@@ -212,12 +212,14 @@ fn test_illegal_raises_interrupt() {
     // ILLEGAL vector is at VBA:$04 (Table 2-2), not P:$3E (DSP56000 holdover on page 13-76)
     pram[0] = 0x000005; // illegal
     run_one(&mut s, &mut jit);
-    // postexecute_interrupts() dispatches the interrupt: pending is cleared,
-    // pipeline is started (interrupt_state becomes Fast, pipeline_stage = 5)
+    // ILLEGAL is arbitrated with a ZERO stream-word budget (silicon,
+    // probe_ill_vector): pending is cleared and the
+    // pipeline is Armed - the next step annuls the following
+    // instruction (saved PC = F+len) and vectors.
     assert!(!s.interrupts.pending(interrupt::ILLEGAL));
     assert!(!s.interrupts.has_pending());
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
-    assert_eq!(s.interrupts.pipeline_stage, 5);
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
+    assert_eq!(s.interrupts.fault_budget, 0);
 }
 
 #[test]
@@ -237,37 +239,36 @@ fn test_interrupt_dispatch_fast() {
     pram[0] = 0x000005; // illegal
     pram[1..10].fill(0x000000); // nops
 
-    // Step 1: execute ILLEGAL at PC=0 -> dispatches interrupt, pipeline=5
+    // Step 1: execute ILLEGAL at PC=0 -> Armed with zero budget
     run_one(&mut s, &mut jit);
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
-    assert_eq!(s.interrupts.pipeline_stage, 5);
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
     assert_eq!(s.pc, 1);
 
-    // Step 2: NOP at PC=1, pipeline 5->4
+    // Step 2: delivery - the NOP at PC=1 is annulled (saved PC),
+    // vector fetched, stage 3
     run_one(&mut s, &mut jit);
-    assert_eq!(s.interrupts.pipeline_stage, 4);
-
-    // Step 3: NOP at PC=2, pipeline 4->3 (save PC=3, redirect to vector 0x04)
-    run_one(&mut s, &mut jit);
+    assert_eq!(s.interrupts.state, InterruptState::Fast);
     assert_eq!(s.interrupts.pipeline_stage, 3);
     assert_eq!(s.pc, 0x04); // redirected to vector
+    assert_eq!(s.interrupts.saved_pc, 1);
 
-    // Step 4: NOP at PC=0x04 (first vector word), pipeline 3->2
+    // Step 3: NOP at PC=0x04 (first vector word), pipeline 3->2
     run_one(&mut s, &mut jit);
     assert_eq!(s.interrupts.pipeline_stage, 2);
     assert_eq!(s.pc, 0x05);
 
-    // Step 5: NOP at PC=0x05 (second vector word), pipeline 2->1
+    // Step 4: NOP at PC=0x05 (second vector word), pipeline 2->1
     // Fast interrupt detected (PC=vector+2) -> restore saved PC
     run_one(&mut s, &mut jit);
     assert_eq!(s.interrupts.pipeline_stage, 1);
-    assert_eq!(s.pc, 3); // restored saved PC
+    assert_eq!(s.pc, 1); // restored saved (annulled) PC
 
-    // Step 6: NOP at PC=3, pipeline 1->0
+    // Step 5: NOP at PC=1 re-executes, pipeline 1->0
     run_one(&mut s, &mut jit);
     assert_eq!(s.interrupts.pipeline_stage, 0);
+    assert_eq!(s.pc, 2);
 
-    // Step 7: NOP at PC=4, pipeline 0 -> re-enable (STATE_NONE)
+    // Step 6: NOP at PC=2, pipeline 0 -> re-enable (STATE_NONE)
     run_one(&mut s, &mut jit);
     assert_eq!(s.interrupts.state, InterruptState::None);
 }
@@ -338,24 +339,20 @@ fn test_interrupt_dispatch_long() {
     pram[0x100] = 0x000000; // nop
     pram[0x101] = 0x000004; // rti
 
-    // Step 1: ILLEGAL -> dispatch pipeline
+    // Step 1: ILLEGAL -> Armed with zero budget
     run_one(&mut s, &mut jit);
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
-    assert_eq!(s.interrupts.pipeline_stage, 5);
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
 
-    // Step 2: pipeline 5->4
-    run_one(&mut s, &mut jit);
-    assert_eq!(s.interrupts.pipeline_stage, 4);
-
-    // Step 3: pipeline 4->3 (save PC, redirect to vector 0x04, detect JSR -> LONG)
+    // Step 2: delivery - save PC, redirect to vector 0x04, JSR
+    // detected -> LONG (context pushed), stage 3
     run_one(&mut s, &mut jit);
     assert_eq!(s.interrupts.pipeline_stage, 3);
     assert_eq!(s.interrupts.state, InterruptState::Long);
     assert_eq!(s.pc, 0x04); // at vector
 
-    // Step 4: execute JSR at 0x04 -> jumps to $100, pipeline 3->2
+    // Step 3: execute JSR at 0x04 -> jumps to $100 (own push skipped,
+    // state Long -> Fast)
     run_one(&mut s, &mut jit);
-    assert_eq!(s.interrupts.pipeline_stage, 2);
     assert_eq!(s.pc, 0x100); // at subroutine
 
     // Stack should have saved context (pushed by long interrupt detection)
@@ -1754,10 +1751,9 @@ fn test_interrupt_long_jscc() {
 
     s.registers[reg::SR] &= !(1 << sr::C); // carry clear -> condition true
 
-    run_one(&mut s, &mut jit); // dispatch
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
-    run_one(&mut s, &mut jit); // 5->4
-    run_one(&mut s, &mut jit); // 4->3, detect long
+    run_one(&mut s, &mut jit); // ILLEGAL executes -> Armed, budget 0
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
+    run_one(&mut s, &mut jit); // delivery: JScc at vector -> long
     assert_eq!(
         s.interrupts.state,
         InterruptState::Long,
@@ -1780,9 +1776,8 @@ fn test_interrupt_long_bsr() {
     pram[0x04] = 0x0D1080; // BSR xxxx
     pram[0x05] = 0x0000FC; // displacement
 
-    run_one(&mut s, &mut jit);
-    run_one(&mut s, &mut jit);
-    run_one(&mut s, &mut jit);
+    run_one(&mut s, &mut jit); // ILLEGAL -> Armed, budget 0
+    run_one(&mut s, &mut jit); // delivery: BSR at vector -> long
     assert_eq!(
         s.interrupts.state,
         InterruptState::Long,
@@ -1888,8 +1883,7 @@ fn test_long_interrupt_clears_sa_bit() {
     // Put a JSR at the ILLEGAL vector (address 4) - triggers long interrupt
     pram[0x04] = 0x0D0064; // JSR $64
     pram[100] = 0x000000; // NOP at JSR target
-    // Execute: ILLEGAL fires, pipeline stages process, JSR at vector -> long
-    run_one(&mut s, &mut jit);
+    // Execute: ILLEGAL arms (budget 0); delivery detects JSR -> long
     run_one(&mut s, &mut jit);
     run_one(&mut s, &mut jit);
     assert_eq!(
@@ -2217,8 +2211,7 @@ fn test_long_interrupt_clears_lf_s1_s0() {
     pram[0x04] = 0x0D0064; // JSR $64
     pram[100] = 0x000000; // NOP at JSR target
 
-    // Execute: ILLEGAL fires, pipeline stages process, JSR at vector -> long
-    run_one(&mut s, &mut jit);
+    // Execute: ILLEGAL arms (budget 0); delivery detects JSR -> long
     run_one(&mut s, &mut jit);
     run_one(&mut s, &mut jit);
 
@@ -3038,9 +3031,8 @@ fn test_illegal_long_interrupt_sets_i1i0_to_3() {
     pram[1..10].fill(0x000000);
     pram[0x04] = 0x0D0064; // JSR $64 at ILLEGAL vector
     pram[100] = 0x000000; // NOP at JSR target
-    run_one(&mut s, &mut jit); // ILLEGAL - posts interrupt, enters fast pipeline
-    run_one(&mut s, &mut jit); // fast word 1 (JSR at vector)
-    run_one(&mut s, &mut jit); // JSR detected -> long interrupt formation
+    run_one(&mut s, &mut jit); // ILLEGAL - Armed with zero budget
+    run_one(&mut s, &mut jit); // delivery: JSR at vector -> long formation
     assert_eq!(
         s.interrupts.state,
         InterruptState::Long,

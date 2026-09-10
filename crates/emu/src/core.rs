@@ -202,6 +202,10 @@ pub enum InterruptState {
 ///   overflowing push itself wraps and LANDS in slot 0, like JSR's)
 /// - ENDDO pop underflow: 5 (silicon start+6 flat; the double pop takes
 ///   SP $00->$3F->$3E and the dispatch frame lands in slot 15)
+/// - ILLEGAL / TRAP / TRAPcc: 0 (immediate: saved PC = F+len, so RTI
+///   SKIPS the faulting instruction; vectors VBA:$04 / VBA:$08 per
+///   Table 2-2; both honor the fast-vector shape - two plain vector
+///   words execute with no frame push, resuming at F+len)
 pub const INVALID_FAULT_BUDGET: u32 = 0xFFFF_FFFF;
 
 impl From<u8> for InterruptState {
@@ -793,7 +797,9 @@ impl DspState {
         let vba = self.registers[reg::VBA] & 0xFFFF00;
         self.interrupts.vector_addr = vba | interrupt::vector_addr(idx) as u32;
         self.interrupts.ipl_to_raise = new_ipl as u8;
-        if idx == interrupt::STACK_ERROR && self.interrupts.fault_budget != INVALID_FAULT_BUDGET {
+        if (idx == interrupt::STACK_ERROR || idx == interrupt::ILLEGAL || idx == interrupt::TRAP)
+            && self.interrupts.fault_budget != INVALID_FAULT_BUDGET
+        {
             // Silicon-probed shadow model: keep executing while the
             // remaining stream-word budget lasts, then annul and vector
             // (deliver_armed_fault, called from the step loop where the

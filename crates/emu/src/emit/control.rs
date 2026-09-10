@@ -10,6 +10,13 @@ impl<'a> Emitter<'a> {
         self.set_inst_len(1);
         self.set_cycles(5);
         self.emit_add_interrupt(interrupt::ILLEGAL);
+        // ILLEGAL delivers with a ZERO stream-word budget: the next
+        // instruction is annulled and becomes the frame's saved PC, so
+        // an RTI resume SKIPS the ILLEGAL (silicon, probe_ill_vector/
+        // probe_ill_rti: vector VBA:$04 per Table 2-2 - the
+        // page 13-76 "P:$3E" note is a DSP56000 holdover - saved PC =
+        // F+len, zero shadow words, fast-vector shape honored).
+        self.emit_arm_fault_budget(0);
     }
 
     pub(super) fn emit_trapcc(&mut self, cc: CondCode) {
@@ -26,6 +33,10 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(trap_blk);
         self.builder.seal_block(trap_blk);
         self.emit_add_interrupt(interrupt::TRAP);
+        // TRAP/TRAPcc deliver with a ZERO stream-word budget: saved PC
+        // = F+len, zero shadow words (silicon, probe_trap_vector/
+        // probe_trapcc_taken: vector VBA:$08 per Table 2-2).
+        self.emit_arm_fault_budget(0);
         self.end_conditional_arm(&mut cond_state);
         self.builder.ins().jump(merge_blk, &[]);
 
