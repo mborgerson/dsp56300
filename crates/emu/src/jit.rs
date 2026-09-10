@@ -192,6 +192,22 @@ impl JitEngine {
     }
 
     /// Create a fresh Cranelift JIT module.
+    ///
+    /// `regalloc_algorithm` is the single largest performance setting in the
+    /// emulator. `single_pass` never splits a live range, so anything that
+    /// outlives a few instructions spills, and this emitter promotes 36 DSP
+    /// registers plus two 56-bit accumulators to Cranelift variables that
+    /// live the whole block. Backtracking keeps them in machine registers:
+    /// 15-24% less host time per DSP cycle for the same cycles per dispatch.
+    ///
+    /// It roughly doubles translation time, which the content-keyed
+    /// translation cache absorbs: steady state compiles nothing, so the
+    /// bill is paid during warm-up. A program that reloads overlays
+    /// continuously would see the trade go the other way.
+    ///
+    /// `opt_level` stays at `none`: `speed` measures inside the noise while
+    /// costing 2.5x the translation time and a worst-case compile over a
+    /// millisecond.
     fn new_module() -> JITModule {
         let mut flag_builder = settings::builder();
         let _ = flag_builder.set("opt_level", "none");
@@ -206,7 +222,7 @@ impl JitEngine {
         };
         let _ = flag_builder.set("enable_verifier", verify);
         let _ = flag_builder.set("unwind_info", "false");
-        let _ = flag_builder.set("regalloc_algorithm", "single_pass");
+        let _ = flag_builder.set("regalloc_algorithm", "backtracking");
         let isa_builder = cranelift_native::builder().unwrap();
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
