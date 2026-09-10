@@ -124,6 +124,19 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Reload a promoted register's Cranelift variable from memory.
+    /// Used after an extern helper writes the register in DspState memory:
+    /// lazy invalidation is not enough inside inline loop bodies, where
+    /// loads emitted EARLIER in the body reuse the variable across the
+    /// backedge (emission order != execution order) and would see a stale
+    /// pre-call value on iterations >= 2.
+    pub(super) fn refresh_promoted_reg(&mut self, idx: usize) {
+        let val = self.load_u32(Self::reg_offset(idx));
+        self.builder.def_var(self.promoted.vars[idx].unwrap(), val);
+        self.promoted.valid[idx] = true;
+        self.promoted.dirty[idx] = false;
+    }
+
     /// Flush all dirty promoted registers to memory. Clears dirty flags.
     pub(super) fn flush_promoted(&mut self) {
         for &idx in &PROMOTED_REGS {
@@ -149,11 +162,15 @@ impl<'a> Emitter<'a> {
         self.promoted.acc_valid = [false; 2];
         self.promoted.dirty = [false; 64];
         self.promoted.acc_dirty = [false; 2];
-        // Mark all registers as "valid at scope entry" so that subsequent
-        // load_reg calls use inline memory reads (which see the extern call's
-        // side effects) rather than deferred block-entry loads (which would
-        // read stale pre-call values).
-        if let Some(scope) = self.scope_stack.last_mut() {
+        // Mark all registers as "valid at scope entry" in EVERY open scope
+        // so that subsequent load_reg calls use inline memory reads (which
+        // see the extern call's side effects) rather than deferred
+        // pre-block loads (which would read stale pre-call values). Every
+        // open scope, not just the top one: a helper call inside an
+        // inline-loop body followed by a post-loop read of an affected
+        // register (e.g. `rep #n / movec ssh,x0` then `movec sp,y0`) would
+        // otherwise resolve the read against the block-entry value.
+        for scope in self.scope_stack.iter_mut() {
             for &idx in &PROMOTED_REGS {
                 scope.entry_valid[idx] = true;
             }
