@@ -346,6 +346,37 @@ uint32_t dsp56300_read_memory(const Dsp56300Jit *dsp, Dsp56300MemSpace space, ui
 void dsp56300_write_memory(Dsp56300Jit *dsp, Dsp56300MemSpace space, uint32_t addr, uint32_t value);
 
 /**
+ * Read `count` consecutive words from DSP memory into `out`.
+ *
+ * One call per address run instead of one per word: an embedder's DMA
+ * engine moves hundreds of words per transfer through this boundary, and
+ * the per-word FFI round trip was most of its cost.
+ *
+ * # Safety
+ * `dsp` must be a valid pointer to a `DspJit`; `out` must point to at
+ * least `count` writable u32s.
+ */
+void dsp56300_read_memory_run(const Dsp56300Jit *dsp,
+                              Dsp56300MemSpace space,
+                              uint32_t addr,
+                              uint32_t *out,
+                              uint32_t count);
+
+/**
+ * Write `count` consecutive words to DSP memory from `vals`, marking the
+ * dirty bitmap for changed P words exactly as `dsp56300_write_memory` does.
+ *
+ * # Safety
+ * `dsp` must be a valid pointer to a `DspJit`; `vals` must point to at
+ * least `count` readable u32s.
+ */
+void dsp56300_write_memory_run(Dsp56300Jit *dsp,
+                               Dsp56300MemSpace space,
+                               uint32_t addr,
+                               const uint32_t *vals,
+                               uint32_t count);
+
+/**
  * Copy all scalar sync state from the JIT into `out`.
  *
  * # Safety
