@@ -460,7 +460,15 @@ mod loop_paths {
     use super::*;
 
     /// Bounds a runaway loop without ever firing for these programs.
-    const INLINE: i32 = i32::MAX;
+    /// Large enough that no loop a 300-cycle budget can care about ever
+    /// preempts (the inline route is preserved for every comparable
+    /// case), and small enough to bound one dispatch's overshoot: a
+    /// case's own code can rewrite a register a nested DO reads its
+    /// count from, and an unbounded dispatch would run such a nest's
+    /// ~10^12 iterations to completion. The legs may then stop at
+    /// different architectural points, which the comparability check
+    /// already handles.
+    const INLINE: i32 = 1 << 20;
     /// Preempts at every backedge.
     const EVERY: i32 = 1;
 
