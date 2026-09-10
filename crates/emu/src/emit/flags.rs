@@ -42,6 +42,12 @@ impl<'a> Emitter<'a> {
         let Some(flags) = self.pending_flags.take() else {
             return;
         };
+        assert!(
+            self.cond_keep_flags == 0,
+            "flag flush inside a keep-flags conditional arm would strand \
+             the pending computation on one path (pc=${:06x})",
+            self.cur_inst_pc,
+        );
         match flags {
             PendingFlags::AluAddSub {
                 result56,
