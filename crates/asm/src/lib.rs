@@ -40,6 +40,9 @@ pub enum WarningKind {
     DuplicateDestination,
     /// PM4 X-field destination register is invalid (a10, b10, x, y).
     InvalidPm4Destination,
+    /// movec with no control-register operand demotes to the MOVE encoding
+    /// (asm56300: "No control registers accessed - using MOVE encoding").
+    MovecUsesMoveEncoding,
     /// SSH used as loop count operand (DO/DOR). Hardware restriction.
     SshAsLoopCount,
     /// SSH cannot be both source and destination in a single move.
@@ -647,7 +650,16 @@ fn pmove_ext_size(pmove: &ParallelMove) -> u32 {
                 1 // symbol/expression: assume long form
             }
         }
-        ParallelMove::ImmToReg { imm, dst, .. } => {
+        ParallelMove::ImmToReg {
+            imm,
+            dst,
+            force_long,
+        } => {
+            // Forced-long immediates (control registers only reach ImmToReg
+            // with this flag) always take the MOVEC long form.
+            if *force_long {
+                return 1;
+            }
             // Must match the PM3 short-form check in encode_parallel().
             let is_bare_lit = matches!(imm, Expr::Literal(_));
             let is_frac = matches!(imm, Expr::Frac(_));
@@ -753,6 +765,24 @@ fn check_warnings(inst: &Instruction) -> Vec<AssembleWarning> {
             warnings.push(warn(
                 WarningKind::SshSourceAndDest,
                 "SSH is both source and destination",
+            ));
+        }
+
+        // movec with no control-register operand demotes to a MOVE encoding.
+        Instruction::MovecReg { src, dst, .. } if src.index() < 0x20 && dst.index() < 0x20 => {
+            warnings.push(warn(
+                WarningKind::MovecUsesMoveEncoding,
+                "no control registers accessed - using MOVE encoding",
+            ));
+        }
+        Instruction::MovecAa { reg, .. }
+        | Instruction::MovecEa { reg, .. }
+        | Instruction::MovecImm { reg, .. }
+            if reg.index() < 0x20 =>
+        {
+            warnings.push(warn(
+                WarningKind::MovecUsesMoveEncoding,
+                "no control registers accessed - using MOVE encoding",
             ));
         }
 
