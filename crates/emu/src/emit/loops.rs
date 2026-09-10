@@ -745,10 +745,17 @@ impl<'a> Emitter<'a> {
 
         self.builder.switch_to_block(taken_blk);
         self.builder.seal_block(taken_blk);
-        // Read current LA before cleanup pops it
+        // Pop the loop frame and restore LF/FV/LA/LC, then jump to LA+1
+        // (manual p.13-28; hardware-verified with a LEGAL
+        // spelling - no arithmetic immediately before the brk, per
+        // restriction A.3.4, and outside the LA-2..LA zone). Violating
+        // A.3.4 makes hardware skip the restore entirely; see
+        // docs/ARCHITECTURE-NOTES.md "Restriction-violation behaviors".
+        // Read current LA before cleanup pops it.
         let la = self.load_reg(reg::LA);
         let one = self.builder.ins().iconst(types::I32, 1);
         let target = self.builder.ins().iadd(la, one);
+        let target = self.mask24(target);
         self.emit_enddo_cleanup();
         self.store_pc(target);
         self.set_inst_len(0);

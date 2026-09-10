@@ -2243,7 +2243,7 @@ fn test_dor_ea_execute_one() {
     assert_eq!(
         s.registers[reg::SR] & (1 << sr::LF),
         0,
-        "LF should be clear after loop exit"
+        "LF should be clear after normal loop exit"
     );
     assert_eq!(s.pc, 3, "PC should be at instruction after loop");
 }
