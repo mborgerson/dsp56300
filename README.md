@@ -94,6 +94,8 @@ Emulator
 
 The `dsp56300-emu` crate provides a core emulator with a JIT execution engine, built with the [Cranelift](https://cranelift.dev/) compiler backend. A library and simple CLI for running an emulator are included.
 
+The emulator powers the DSP cores of the MCPX audio processor in [xemu](https://xemu.app), the original Xbox emulator. Its behavior is confirmed by differential testing against real hardware: corpus programs are run on the emulator and on silicon, and the resulting state dumps are compared word for word. See [`tools/difftest/README.md`](tools/difftest/README.md) for the harness.
+
 ```rust
 use dsp56300_emu::core::{DspState, MemoryMap};
 use dsp56300_emu::jit::JitEngine;
