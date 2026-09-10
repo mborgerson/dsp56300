@@ -1882,11 +1882,14 @@ impl<'a> Emitter<'a> {
             .ins()
             .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, acc_val]);
 
-        // Invalidate SR (helper modifies L and S flags)
-        self.promoted.valid[reg::SR] = false;
-        if let Some(scope) = self.scope_stack.last_mut() {
-            scope.entry_valid[reg::SR] = true;
-        }
+        // The helper modifies L and S flags in memory. Eagerly reload the
+        // promoted SR variable (not just lazy invalidation): loads emitted
+        // earlier in an inline loop body reuse the variable across the
+        // backedge, so only a def here makes iterations >= 2 see the
+        // helper's L/S updates. The def also keeps a post-loop read off
+        // the block-entry value (`rep #n / move a,x:(r0)+` then a jcc on
+        // L).
+        self.refresh_promoted_reg(reg::SR);
 
         self.builder.inst_results(call)[0]
     }
@@ -1904,6 +1907,13 @@ impl<'a> Emitter<'a> {
             .ins()
             .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, val]);
         self.invalidate_promoted();
+        // Eagerly reload the registers these helpers modify in memory
+        // (stack view + SR); lazy invalidation is unsound in inline loop
+        // bodies (see refresh_promoted_reg). Unmodified registers keep
+        // their (still-correct) variables via the lazy path.
+        for r in [reg::SR, reg::SP, reg::SSH, reg::SSL] {
+            self.refresh_promoted_reg(r);
+        }
     }
 
     /// Emit a call to an extern "C" fn(*mut DspState, i64) helper that only
@@ -1919,13 +1929,12 @@ impl<'a> Emitter<'a> {
         self.builder
             .ins()
             .call_indirect(sig_ref, fn_ptr, &[self.state_ptr, val]);
-        // Invalidate SR so next load_reg(SR) reloads from memory.
-        // Mark entry_valid=true so the reload is inline (not deferred to
-        // the pre-block, which would read the stale pre-call value).
-        self.promoted.valid[reg::SR] = false;
-        if let Some(scope) = self.scope_stack.last_mut() {
-            scope.entry_valid[reg::SR] = true;
-        }
+        // Eagerly reload the promoted SR variable from memory. Lazy
+        // invalidation is unsound in inline loop bodies (see
+        // refresh_promoted_reg): a flush arm that ends with this helper
+        // (NzOnly) would leave earlier-emitted SR loads reading a stale
+        // variable across the backedge.
+        self.refresh_promoted_reg(reg::SR);
     }
 
     /// Emit a call to an extern "C" fn(*mut DspState) -> u32 helper.
@@ -1942,6 +1951,10 @@ impl<'a> Emitter<'a> {
             .ins()
             .call_indirect(sig_ref, fn_ptr, &[self.state_ptr]);
         self.invalidate_promoted();
+        // See emit_call_extern_val: eager reload of helper-modified regs.
+        for r in [reg::SR, reg::SP, reg::SSH, reg::SSL] {
+            self.refresh_promoted_reg(r);
+        }
         self.builder.inst_results(call)[0]
     }
 
