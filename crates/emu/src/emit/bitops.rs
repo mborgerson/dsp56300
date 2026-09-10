@@ -82,12 +82,18 @@ impl<'a> Emitter<'a> {
         self.set_cycles(2);
         // SSH is special (hardware-verified): BTST reads it like a move
         // source and pops the stack; the modifying ops rewrite the top
-        // stack slot in place without touching SP. Other registers use
-        // load_reg/store_reg (not read/write_reg_for_move) so there is no
-        // accumulator limiting.
+        // stack slot in place without touching SP.
+        // FULL-accumulator targets (a/b) go through the move path on
+        // silicon (hardware-verified): limited (scaled) 24-bit
+        // read, RMW on the limited value, sign-extended write-back that
+        // clears a0, with L/S updated by the read. Other registers use
+        // load_reg/store_reg - no limiting.
         let is_ssh = reg_idx as usize == reg::SSH;
+        let is_full_acc = reg_idx as usize == reg::A || reg_idx as usize == reg::B;
         let val = if is_ssh && op == BitOp::Test {
             self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
+        } else if is_full_acc {
+            self.read_reg_for_move(reg_idx as usize)
         } else {
             // For SSH this reads the top-of-stack mirror, kept coherent by
             // every push/pop.
@@ -96,6 +102,8 @@ impl<'a> Emitter<'a> {
         if let Some(result) = self.apply_bit_op(val, bit_num as u32, op) {
             if is_ssh {
                 self.emit_call_extern_val(jit_write_ssh_tos as *const () as usize, result);
+            } else if is_full_acc {
+                self.write_reg_for_move(reg_idx as usize, result);
             } else {
                 self.store_reg(reg_idx as usize, result);
             }
