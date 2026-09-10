@@ -2721,3 +2721,33 @@ fn test_inline_loop_preemption_is_slice_independent() {
         "the loop was never preempted, so the invariant is untested"
     );
 }
+
+#[test]
+fn test_out_of_range_extension_byte_does_not_leak_into_carry() {
+    // A2/B2 are 8 bits. An embedder that pokes a wider value into
+    // DspState::registers must not have it packed into bits 56+ of the
+    // promoted accumulator, which is exactly where a subtraction's carry
+    // comes from - the flag would then depend on whether anything had
+    // already flushed (and so masked) the register, i.e. on where the block
+    // boundaries fell. Reloading masks the sub-registers, so an over-wide
+    // extension byte reads as the architectural one.
+    fn carry(b2: u32) -> u32 {
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        pram[0] = 0x20006D; // cmp x1,b
+        pram[1] = 0x0C0001; // jmp $0001 (park)
+        s.registers[reg::B2] = b2;
+        s.registers[reg::SR] = 0xC0_0300;
+        s.run(&mut jit, 4);
+        s.registers[reg::SR] & (1 << sr::C)
+    }
+
+    assert_eq!(
+        carry(0xB1_BBFD),
+        carry(0xFD),
+        "bits above the 8-bit extension byte reached the carry"
+    );
+}
