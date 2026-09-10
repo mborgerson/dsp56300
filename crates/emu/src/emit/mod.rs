@@ -276,6 +276,17 @@ enum PendingFlags {
 }
 
 impl PendingFlags {
+    /// Does materializing this kind rewrite all four of E, U, N and Z?
+    /// True for every kind that goes through `jit_update_nz`, which clears
+    /// E|U|N|Z and then sets them from the result. `Shift24` and `Logical`
+    /// leave E and U alone, so they cannot kill a predecessor's EUNZ.
+    fn rewrites_eunz(&self) -> bool {
+        !matches!(
+            self,
+            PendingFlags::Shift24 { .. } | PendingFlags::Logical { .. }
+        )
+    }
+
     /// Does materializing this kind consume the deferred SM saturation
     /// marker (`emit_sm_vl_deferred`)? Only these kinds need the marker
     /// carried alongside them.
