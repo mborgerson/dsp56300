@@ -829,11 +829,48 @@ mod loop_paths {
         let seed0 = env_u64("SLICEDIFF_SEED").unwrap_or(0x2026_0827);
         let total = env_u64("SLICEDIFF_TOTAL").unwrap_or(DEFAULT_TOTAL as u64) as i32;
         let mut e = Engines::new();
-        let pool = body_pool(&mut e, 256);
+        // SLICEDIFF_POOL_FILE caches the (deterministic) body pool across
+        // runs - body_pool costs ~a minute and dominates single-case
+        // repro iteration.
+        let pool = match std::env::var("SLICEDIFF_POOL_FILE").ok() {
+            Some(path) => match std::fs::read_to_string(&path) {
+                Ok(text) => text
+                    .split_whitespace()
+                    .filter_map(|w| u32::from_str_radix(w, 16).ok())
+                    .collect(),
+                Err(_) => {
+                    let pool = body_pool(&mut e, 256);
+                    let text: Vec<String> = pool.iter().map(|w| format!("{w:06x}")).collect();
+                    let _ = std::fs::write(&path, text.join("\n"));
+                    pool
+                }
+            },
+            None => body_pool(&mut e, 256),
+        };
         println!("body pool: {} words", pool.len());
 
         if let Some(seed) = env_u64("SLICEDIFF_CASE") {
             let c = gen_loop_case(&mut Rng(seed), &pool);
+            if let Some(t1) = env_u64("SLICEDIFF_ONE") {
+                let t0 = std::time::Instant::now();
+                let r = e.run_all(&c, t1 as i32);
+                eprintln!(
+                    "ONE: t={} comparable={} elapsed={:?}",
+                    t1,
+                    r.is_some(),
+                    t0.elapsed()
+                );
+                return;
+            }
+            if std::env::var_os("SLICEDIFF_DUMP").is_some() {
+                for (i, w) in c.p.iter().enumerate() {
+                    if *w != 0 {
+                        eprintln!("P {:04x} {:06x}", i, w);
+                    }
+                }
+                dump(&c);
+                return;
+            }
             let Some(t) =
                 (1..=total).find(|&t| e.run_all(&c, t).is_some_and(|s| !verdict(&s).is_empty()))
             else {
@@ -854,12 +891,26 @@ mod loop_paths {
         }
 
         let mut rng = Rng(seed0);
+        // SLICEDIFF_SKIP fast-forwards the seed sequence without running
+        // the cases (engine state differs from a full run - a
+        // state-dependent repro still needs the sequential prefix);
+        // SLICEDIFF_PROGRESS traces each case's index and seed to stderr,
+        // so a case that wedges an engine is the line after the last one
+        // a run printed.
+        let skip = env_u64("SLICEDIFF_SKIP").unwrap_or(0);
+        for _ in 0..skip {
+            rng.next();
+        }
+        let progress = std::env::var_os("SLICEDIFF_PROGRESS").is_some();
         let (mut checked, mut inlined, mut comparable) = (0u64, 0u64, 0u64);
         let (mut skipped, mut fails) = (0u64, 0u64);
         let mut by_pair = [0u64; 3];
         let mut seeds = Vec::new();
-        for _ in 0..iters {
+        for i in 0..iters {
             let seed = rng.next() | 1;
+            if progress {
+                eprintln!("case {} seed {:#x}", skip + i, seed);
+            }
             let c = gen_loop_case(&mut Rng(seed), &pool);
             if reps_an_enddo(&c) {
                 skipped += 1;
