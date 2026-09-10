@@ -148,8 +148,18 @@ impl<'a> Emitter<'a> {
         if la >= p_end {
             return false;
         }
-        // Body must not extend past an outer DO loop boundary.
-        if la + 1 > outer_stop_pc {
+        // Body must not reach an enclosing DO loop's boundary. Ending at
+        // the same address as the enclosing loop is not a nest the inlined
+        // shape can express: hardware ends only the innermost loop there, so
+        // the enclosing one restores its LA behind a PC that has already
+        // passed it and never terminates - which is what the
+        // instruction-at-a-time and block-boundary paths both do. The inlined
+        // form ends both, because the block's own end-of-loop handling fires
+        // at the same instruction as the inline loop's exit. `outer_stop_pc`
+        // is the enclosing loop's LA+1 (or u32::MAX outside a loop), so
+        // rejecting equality here covers both a lexically nested DO and a
+        // block compiled inside a loop the translator cannot see.
+        if la + 1 >= outer_stop_pc {
             return false;
         }
         // Body must start at or before LA (non-empty body).
@@ -177,7 +187,10 @@ impl<'a> Emitter<'a> {
                 // Nested DO/DOR: recursively check if the inner body is safe.
                 let nw = map.read_pram(mask_pc(body_pc + 1));
                 let inner_la = Self::compute_do_la(&inst, body_pc, nw);
-                if inner_la > la {
+                // The inner loop must end strictly before the outer's LA;
+                // the recursive call's `outer_stop_pc` check says the same
+                // thing, this is just the early-out.
+                if inner_la >= la {
                     return false;
                 }
                 let inner_body_start = body_pc + 2;
