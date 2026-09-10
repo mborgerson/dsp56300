@@ -1195,9 +1195,10 @@ fn test_do_forever_does_not_exit_on_lc_zero() {
 }
 
 #[test]
-fn test_do_sp_loads_lc_with_sp_plus_one() {
-    // DO SP,expr: Manual page 13-56 says LC = SP_before + 1
-    // With SP=3 before DO, LC should be loaded with 4.
+fn test_do_sp_loads_lc_with_sp() {
+    // DO SP,expr: Manual page 13-56 claims LC = SP_before + 1; MCPX
+    // silicon loads SP unmodified (see ARCHITECTURE-NOTES.md).
+    // With SP=3 before DO, LC should be loaded with 3.
     // DO SP,expr opcode: 0x06FB00 (DDDDDD=111011=SP)
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
@@ -1212,12 +1213,8 @@ fn test_do_sp_loads_lc_with_sp_plus_one() {
     pram[4] = 0x000000; // NOP
     pram[5] = 0x000000; // NOP (last instruction of loop)
     run_one(&mut s, &mut jit); // execute DO SP,expr
-    // LC should be SP_before + 1 = 3 + 1 = 4
-    assert_eq!(
-        s.registers[reg::LC],
-        4,
-        "DO SP should load LC with SP+1 (3+1=4)"
-    );
+    // LC should be SP_before = 3 (silicon: no +1)
+    assert_eq!(s.registers[reg::LC], 3, "DO SP should load LC with SP (3)");
 }
 
 #[test]
@@ -1293,16 +1290,15 @@ fn test_nested_do_inside_do_forever_terminates() {
 }
 
 #[test]
-fn test_do_sp_inline_loads_lc_with_sp_plus_one() {
-    // The inline DO path (emit_do_lc_value) was missing the SP+1
-    // adjustment that the non-inline path (emit_do_reg) correctly applies.
-    // Manual page 13-56: "For the DO SP, expr instruction, the actual value
-    // that is loaded into the LC is the value of SP before the DO instruction
-    // executes, incremented by one."
+fn test_do_sp_inline_loads_lc_with_sp() {
+    // Manual page 13-56 claims DO SP loads SP+1 into LC; MCPX silicon
+    // loads SP unmodified (probed at SP=1 and SP=3, iteration-counting
+    // bodies - see ARCHITECTURE-NOTES.md). Both the inline path
+    // (emit_do_lc_value) and the non-inline path (emit_do_reg) follow
+    // silicon.
     //
     // Use s.run() to trigger block compilation which uses the inline path.
-    // DO SP with SP=2: LC should be 3. Loop body increments X0 each iteration.
-    // If LC=3, X0 should be 3 at end. If buggy (LC=2), X0 would be 2.
+    // DO SP with SP=2: LC should be 2.
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -1316,14 +1312,14 @@ fn test_do_sp_inline_loads_lc_with_sp_plus_one() {
     pram[2] = 0x014180; // add #1,A
     pram[3] = 0x000000; // nop (last instruction = LA)
     pram[4] = 0x000000; // nop (after loop)
-    // Give enough cycles: DO=6, body=2*3iterations=6, post-loop=1 => ~13+
+    // Give enough cycles: DO=6, body=2*2iterations=4, post-loop=1 => ~11+
     s.run(&mut jit, 50);
-    // With SP=2, LC should be 3 (SP+1). Each iteration does add #1,A => A1=3.
-    // If buggy (LC=2), A1 would be 2.
+    // With SP=2, LC should be 2 (silicon: no +1). Each iteration does
+    // add #1,A => A1=2.
     assert_eq!(
         s.registers[reg::A1],
-        3,
-        "DO SP with SP=2 should loop 3 times (LC=SP+1=3), got A1={}",
+        2,
+        "DO SP with SP=2 should loop 2 times (LC=SP=2), got A1={}",
         s.registers[reg::A1]
     );
 }
@@ -2370,8 +2366,9 @@ fn test_dor_imm_lc_zero_annul() {
 }
 
 #[test]
-fn test_dor_sp_loads_lc_with_sp_plus_one() {
-    // DSP56300FM p.13-61: DOR SP,expr - LC = SP_before + 1.
+fn test_dor_sp_loads_lc_with_sp() {
+    // DSP56300FM p.13-61 claims LC = SP_before + 1; MCPX silicon loads
+    // SP unmodified (see ARCHITECTURE-NOTES.md).
     // DOR reg encoding: 0000011011DDDDDD00010000, DDDDDD=111011 (SP).
     // 0x06FB10
     let mut jit = JitEngine::new(PRAM_SIZE);
@@ -2385,11 +2382,11 @@ fn test_dor_sp_loads_lc_with_sp_plus_one() {
     pram[2] = 0x000008; // inc A (body at LA)
     pram[3] = 0x0C0003; // jmp $3 (halt)
     s.run(&mut jit, 200);
-    // LC should have been SP+1 = 3, so 3 iterations
+    // LC should have been SP = 2, so 2 iterations (silicon: no +1)
     assert_eq!(
         s.registers[reg::A0],
-        3,
-        "DOR SP should iterate SP+1 = 3 times"
+        2,
+        "DOR SP should iterate SP = 2 times"
     );
 }
 
