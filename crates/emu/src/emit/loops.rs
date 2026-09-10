@@ -249,6 +249,10 @@ impl<'a> Emitter<'a> {
         let loop_exit = self.builder.create_block();
 
         self.flush_pending_cycles(); // flush pre-REP cycles before entering loop
+        // Pre-REP CCR state must materialize before the loop: the body may
+        // execute zero times, and a set_pending inside it would strand the
+        // pre-REP computation on the skip path.
+        self.flush_pending_flags();
         // Flush dirty registers before the loop: the body may execute zero
         // times, and a flush/invalidate inside it (e.g. a P-memory-writing
         // target) clears compile-time dirty flags globally - without this,
@@ -276,6 +280,10 @@ impl<'a> Emitter<'a> {
         // this into a stale memory reload and the loop would never
         // terminate.
         self.flush_pending_cycles(); // flush body cycles once per iteration
+        // The body's CCR update must land inside the loop: its SSA values
+        // are defined in the body and must not leak to the exit path, where
+        // they would misreport flags for the zero-iteration case.
+        self.flush_pending_flags();
         let one = self.builder.ins().iconst(types::I32, 1);
         let new_lc = self.builder.ins().isub(lc_cur, one);
         let new_lc = self.mask_lc(new_lc);
@@ -319,6 +327,9 @@ impl<'a> Emitter<'a> {
 
         // Check for DO annul (LC=0): skip body entirely
         self.flush_pending_cycles(); // flush pre-DO cycles before entering loop
+        // Pre-DO CCR state must materialize before the annul branch: a
+        // set_pending inside the body would strand it on the skip path.
+        self.flush_pending_flags();
         self.emit_do_annul_check(lc_val, forever, do_pc, la, after_loop);
         self.builder.ins().jump(pre_loop, &[]);
         self.builder.switch_to_block(loop_header);
@@ -352,6 +363,9 @@ impl<'a> Emitter<'a> {
 
         // 4. Decrement LC, check loop continuation.
         self.flush_pending_cycles(); // flush body cycles once per iteration
+        // The last body op's CCR update must land inside the loop, not leak
+        // past the exit where its body-defined SSA values are invalid.
+        self.flush_pending_flags();
         self.emit_lc_decrement_and_branch(loop_header, loop_exit);
 
         // 5. Pop loop scope and emit pre-loop block with targeted loads.

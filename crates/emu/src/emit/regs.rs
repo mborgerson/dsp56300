@@ -163,6 +163,10 @@ impl<'a> Emitter<'a> {
 
     /// Snapshot dirty/valid state before a conditional branch (brif).
     pub(super) fn begin_conditional(&mut self) -> ConditionalState {
+        // Materialize pre-branch deferred flags while their values still
+        // dominate every path; leaving them pending would let a flush inside
+        // one arm strand the update on the other arm's path.
+        self.flush_pending_flags();
         ConditionalState {
             saved_dirty: self.promoted.dirty,
             saved_acc_dirty: self.promoted.acc_dirty,
@@ -179,6 +183,11 @@ impl<'a> Emitter<'a> {
     ///
     /// Call this just before `jump(merge_blk)` in each arm.
     pub(super) fn end_conditional_arm(&mut self, state: &mut ConditionalState) {
+        // Arm-scoped deferred flags must materialize inside the arm; past
+        // the merge their SSA values don't dominate and the update would
+        // apply on paths that didn't take this arm. (No current instruction
+        // defers flags inside an arm; this guards the invariant.)
+        self.flush_pending_flags();
         for &idx in &PROMOTED_REGS {
             if self.promoted.dirty[idx] && !state.saved_dirty[idx] {
                 self.flush_reg(idx);
