@@ -229,13 +229,7 @@ impl<'a> Emitter<'a> {
         self.set_cycles(5); // REP overhead
 
         let lc_val = self.emit_rep_lc_value(rep_inst);
-
-        // REP with LC=0: repeat 65,536 times (page 13-160)
-        let zero = self.builder.ins().iconst(types::I32, 0);
-        let is_zero = self.builder.ins().icmp(IntCC::Equal, lc_val, zero);
-        let big = self.builder.ins().iconst(types::I32, 0x10000);
-        let lc_init = self.builder.ins().select(is_zero, big, lc_val);
-        self.store_reg(reg::LC, lc_init);
+        self.store_reg(reg::LC, lc_val);
 
         // 2. Decode the next instruction (the one to repeat)
         let next_pc = rep_pc + 1;
@@ -243,23 +237,50 @@ impl<'a> Emitter<'a> {
         let next_next_word = self.map.read_pram(mask_pc(next_pc + 1));
         let next_inst = decode::decode(next_opcode);
 
-        // 3. Create Cranelift loop with deferred pre-loop block
+        // 3. Create Cranelift loop with deferred pre-loop block. The loop
+        // is while-style: the LC test sits at the header, so REP with LC=0
+        // executes the target zero times (hardware-verified; diverges
+        // from the 56300FM's "65,536 repeats"). Keeping
+        // the exit branch inside the loop scope means no control path
+        // bypasses the pre-loop deferred register loads.
         let pre_loop = self.builder.create_block();
         let loop_header = self.builder.create_block();
+        let loop_body = self.builder.create_block();
         let loop_exit = self.builder.create_block();
 
         self.flush_pending_cycles(); // flush pre-REP cycles before entering loop
+        // Flush dirty registers before the loop: the body may execute zero
+        // times, and a flush/invalidate inside it (e.g. a P-memory-writing
+        // target) clears compile-time dirty flags globally - without this,
+        // pre-REP register state would never reach memory on the skip path.
+        self.flush_promoted();
         self.builder.ins().jump(pre_loop, &[]);
         self.builder.switch_to_block(loop_header);
         // Don't seal loop_header yet - back-edge pending
 
-        // 4. Push loop scope and emit the repeated instruction
+        // 4. Push loop scope; header tests LC, body runs the instruction
         self.push_loop_scope(pre_loop);
+        let lc_cur = self.load_reg(reg::LC);
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let done = self.builder.ins().icmp(IntCC::Equal, lc_cur, zero);
+        self.builder
+            .ins()
+            .brif(done, loop_exit, &[], loop_body, &[]);
+        self.builder.switch_to_block(loop_body);
+        self.builder.seal_block(loop_body);
         self.emit_instruction(&next_inst, next_pc, next_next_word);
 
-        // 5. Decrement LC, check if done
+        // 5. Decrement LC and loop back to the header test. Decrement the
+        // header's SSA value (lc_cur), not a load_reg: a flush/invalidate
+        // inside the body (callback reads, P writes) would otherwise turn
+        // this into a stale memory reload and the loop would never
+        // terminate.
         self.flush_pending_cycles(); // flush body cycles once per iteration
-        self.emit_lc_decrement_and_branch(loop_header, loop_exit);
+        let one = self.builder.ins().iconst(types::I32, 1);
+        let new_lc = self.builder.ins().isub(lc_cur, one);
+        let new_lc = self.mask_lc(new_lc);
+        self.store_reg(reg::LC, new_lc);
+        self.builder.ins().jump(loop_header, &[]);
 
         // 6. Pop loop scope and emit pre-loop block with targeted loads
         self.pop_loop_scope(loop_header);

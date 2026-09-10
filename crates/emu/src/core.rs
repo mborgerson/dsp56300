@@ -601,10 +601,15 @@ impl DspState {
                     self.registers[reg::LC] = self.registers[reg::TEMP];
                 }
             } else {
-                // First call after REP instruction:
-                // REP with LC=0 repeats 65,536 times (page 13-160)
+                // First call after REP instruction. REP with LC=0 does not
+                // execute the target at all on real hardware - the 56300FM's
+                // "repeats 65,536 times" (page 13-160) does not hold on
+                // this core. Skip the (necessarily
+                // one-word) repeated instruction.
                 if self.registers[reg::LC] == 0 {
-                    self.registers[reg::LC] = 0x10000;
+                    self.loop_rep = false;
+                    self.registers[reg::LC] = self.registers[reg::TEMP];
+                    self.pc_advance += 1;
                 }
                 self.pc_on_rep = false;
             }
