@@ -85,6 +85,13 @@ impl<'a> Emitter<'a> {
         read_fn: unsafe extern "C" fn(*mut std::ffi::c_void, u32) -> u32,
         addr: Value,
     ) -> Value {
+        // Deliberately NOT a `defer_hazard_sites` bump: pending flags
+        // already ride across callback calls unmaterialized (see
+        // emit_call_read_accu24), so "callbacks do not read SR" is a
+        // standing contract, and a map with any callback region would
+        // otherwise gate every dynamic access off the backedge deferral.
+        // Peripheral-WRITING bodies still gate via the exit check's
+        // flush_all_to_memory.
         let fn_val = self
             .builder
             .ins()
@@ -114,6 +121,7 @@ impl<'a> Emitter<'a> {
         addr: Value,
         val: Value,
     ) {
+        // No `defer_hazard_sites` bump - see emit_callback_read_dyn.
         let fn_val = self
             .builder
             .ins()

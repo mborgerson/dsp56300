@@ -5,6 +5,13 @@ impl<'a> Emitter<'a> {
 
     pub(super) fn load_reg(&mut self, idx: usize) -> Value {
         if idx == reg::SR {
+            if !self.in_flag_flush {
+                // Any SR read outside the flag-flush machinery's own RMW
+                // may observe bits a backedge deferral leaves stale - a
+                // condition evaluation, a guest move, SR stacking, a
+                // helper argument. See `defer_hazard_sites`.
+                self.defer_hazard_sites += 1;
+            }
             self.flush_pending_flags();
         }
         if let Some(var) = self.promoted.vars[idx] {
@@ -308,6 +315,10 @@ impl<'a> Emitter<'a> {
     /// Does NOT clear dirty flags - safe for side paths (early_ret) where
     /// the main path's dirty tracking must be preserved.
     pub(super) fn flush_all_to_memory(&mut self) {
+        // Every host-exit spill: after it, the run loop (and the guest's
+        // architectural state) can be observed mid-loop, so a body that
+        // emits one cannot defer flags across the back edge.
+        self.defer_hazard_sites += 1;
         for &idx in &PROMOTED_REGS {
             self.flush_reg(idx);
         }

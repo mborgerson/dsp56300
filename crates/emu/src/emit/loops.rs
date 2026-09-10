@@ -31,7 +31,13 @@ impl<'a> Emitter<'a> {
     /// the code, not of the schedule.
     ///
     /// Leaves the builder positioned in the continue block.
-    fn emit_loop_preemption_check(&mut self, resume_pc: u32) {
+    ///
+    /// `deferred_nz`: an E/U/N/Z computation deferred across the back edge
+    /// (`flush_pending_flags_backedge_deferring_eunz`) that must reach SR
+    /// before the bail's exit - the run loop resumes through a block that
+    /// reads SR as materialized. Emitted in the bail arm only; the continue
+    /// path leaves it deferred for the loop exit.
+    fn emit_loop_preemption_check(&mut self, resume_pc: u32, deferred_nz: Option<Value>) {
         self.flush_pending_cycles();
         let total = self.builder.use_var(self.total_cycles);
         let quantum = self
@@ -49,6 +55,9 @@ impl<'a> Emitter<'a> {
 
         self.builder.switch_to_block(bail);
         self.builder.seal_block(bail);
+        if let Some(result56) = deferred_nz {
+            self.emit_deferred_nz(result56);
+        }
         self.flush_all_to_memory();
         let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
         self.store_pc(pc_val);
@@ -466,6 +475,10 @@ impl<'a> Emitter<'a> {
 
         // 3. Push loop scope and emit all body instructions [do_pc+2, la].
         self.push_loop_scope(pre_loop);
+        // Snapshot the hazard counter: the body may defer its final flag
+        // computation across the back edge only if it emits no site that
+        // could observe SR (or leave compiled code) mid-iteration.
+        let hazard_mark = self.defer_hazard_sites;
         let body_start = do_pc + 2;
         let mut body_pc = body_start;
         while body_pc <= la {
@@ -492,9 +505,21 @@ impl<'a> Emitter<'a> {
 
         // 4. Decrement LC, check loop continuation.
         self.flush_pending_cycles(); // flush body cycles once per iteration
-        // The last body op's CCR update must land inside the loop, not leak
-        // past the exit where its body-defined SSA values are invalid.
-        self.flush_pending_flags();
+        // The body's final CCR update materializes once per iteration here.
+        // When nothing in the body can observe SR mid-iteration, the
+        // E/U/N/Z helper call - a pure overwrite, so dead on every
+        // iteration but the last - defers to the loop exit (and the
+        // preemption bail) and runs once, on the final iteration's result.
+        // The V/C/L/SM half still lands per iteration: L and the SM V/L
+        // are sticky ORs. The exit edge leaves from the LC-decrement block
+        // at the body's bottom, so the body-defined result dominates every
+        // materialization site.
+        let deferred_nz = if self.defer_hazard_sites == hazard_mark {
+            self.flush_pending_flags_backedge_deferring_eunz()
+        } else {
+            self.flush_pending_flags();
+            None
+        };
         // Flush the body's register writes to memory once per iteration:
         // conditional-arm merges invalidate their destinations, and the
         // resulting inline memory reloads re-execute EVERY iteration - a
@@ -510,7 +535,7 @@ impl<'a> Emitter<'a> {
         self.emit_lc_decrement_and_branch(backedge, loop_exit);
         self.builder.switch_to_block(backedge);
         self.builder.seal_block(backedge);
-        self.emit_loop_preemption_check(body_start);
+        self.emit_loop_preemption_check(body_start, deferred_nz);
         self.builder.ins().jump(loop_header, &[]);
 
         // 5. Pop loop scope and emit pre-loop block with targeted loads.
@@ -520,7 +545,13 @@ impl<'a> Emitter<'a> {
         self.builder.switch_to_block(loop_exit);
         self.builder.seal_block(loop_exit);
 
-        // 7. Loop exit cleanup: pop stack, restore LA/LC/LF.
+        // 7. Loop exit cleanup: pop stack, restore LA/LC/LF. A deferred
+        // backedge E/U/N/Z call materializes first, on the last iteration's
+        // result (this edge leaves the LC-decrement block, so it dominates)
+        // - and before the LF restore reads SR.
+        if let Some(result56) = deferred_nz {
+            self.emit_deferred_nz(result56);
+        }
         self.emit_enddo_cleanup();
         // Flush the body's final register state to memory on the loop path
         // (the annul path flushed inside the annul block). Registers whose
