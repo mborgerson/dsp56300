@@ -27,7 +27,7 @@ const HOST_CALL_CONV: CallConv = CallConv::SystemV;
 use crate::core::{
     DspState, InterruptState, MemSpace, MemoryMap, PowerState, RegionKind, interrupt,
     jit_read_accu24, jit_read_ssh, jit_rnd56, jit_update_rn, jit_write_mem, jit_write_sp,
-    jit_write_ssh, jit_write_ssl, reg, sr,
+    jit_write_ssh, jit_write_ssh_tos, jit_write_ssl, reg, sr,
 };
 use dsp56300_core::{
     Accumulator, CondCode, Instruction, MulShiftOp, PERIPH_BASE, ParallelAlu, ParallelMoveType,

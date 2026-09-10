@@ -606,11 +606,10 @@ impl<'a> Emitter<'a> {
 
     /// Read the operand value for a bit-test instruction given the addressing mode.
     ///
-    /// `pop_ssh`: when true and the register is SSH, perform a stack pop
-    /// (decrement SP).  The manual specifies this for BRCLR/BRSET/BSCLR/BSSET
-    /// (p.13-26,29,32,35) but NOT for JCLR/JSET/JSCLR/JSSET or BCLR/BSET/
-    /// BCHG/BTST.
-    pub(super) fn read_bit_test_operand(&mut self, addr: &BitTestAddr, pop_ssh: bool) -> Value {
+    /// An SSH register operand always pops the stack (hardware-verified
+    /// for every bit-test-branch variant; the manual documents it only
+    /// for BRCLR/BRSET/BSCLR/BSSET, p.13-26,29,32,35).
+    pub(super) fn read_bit_test_operand(&mut self, addr: &BitTestAddr) -> Value {
         match *addr {
             BitTestAddr::Pp { space, pp_offset } => {
                 self.read_mem(space, 0xFFFFC0u32 + pp_offset as u32)
@@ -620,8 +619,11 @@ impl<'a> Emitter<'a> {
             }
             BitTestAddr::Aa { space, addr } => self.read_mem(space, addr as u32),
             BitTestAddr::Reg { reg_idx } => {
-                if pop_ssh && reg_idx as usize == reg::SSH {
-                    // BR*/BS* variants pop SSH per the manual.
+                if reg_idx as usize == reg::SSH {
+                    // Every bit-test read of SSH pops the stack
+                    // (hardware-verified for the jump, jump-subroutine,
+                    // branch, and branch-subroutine variants alike; the
+                    // manual documents only the BR*/BS* forms).
                     self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
                 } else {
                     // Plain register access - no move side effects.
@@ -654,12 +656,7 @@ impl<'a> Emitter<'a> {
             BitTestBranch::Branch { .. } | BitTestBranch::BranchSub { .. } => 5,
         };
         self.set_cycles(cycles);
-        let pop_ssh = matches!(
-            branch,
-            BitTestBranch::Branch { .. } | BitTestBranch::BranchSub { .. }
-        );
-        let val = self.read_bit_test_operand(addr, pop_ssh);
-
+        let val = self.read_bit_test_operand(addr);
         let mask = self.builder.ins().iconst(types::I32, 1i64 << bit_num);
         let masked = self.builder.ins().band(val, mask);
         let zero = self.builder.ins().iconst(types::I32, 0);

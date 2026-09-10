@@ -1766,8 +1766,9 @@ fn test_interrupt_long_bsr() {
 }
 
 #[test]
-fn test_btst_ssh_does_not_pop_stack() {
-    // BTST #n,D on SSH should read SSH as a plain register, not pop the stack.
+fn test_btst_ssh_pops_stack() {
+    // BTST #n,D on SSH reads SSH like a move source: it pops the stack
+    // (hardware-verified).
     // Template: 0000101111DDDDDD0110bbbb
     // DDDDDD=0x3C (SSH=111100), bbbb=0000 (bit 0)
     // 0000_1011_1111_1100_0110_0000 = 0x0BFC60
@@ -1779,18 +1780,19 @@ fn test_btst_ssh_does_not_pop_stack() {
     // Push two values onto the stack so SP=2
     s.stack_push(0x123456, 0xABCDEF); // SP=1
     s.stack_push(0x654321, 0xFEDCBA); // SP=2
-    let sp_before = s.registers[reg::SP] & 0xF;
-    assert_eq!(sp_before, 2);
     pram[0] = 0x0BFC60; // btst #0,SSH
     run_one(&mut s, &mut jit);
-    // SP must remain unchanged (no pop)
     let sp_after = s.registers[reg::SP] & 0xF;
-    assert_eq!(sp_after, sp_before, "BTST on SSH should not pop the stack");
+    assert_eq!(sp_after, 1, "BTST on SSH pops the stack");
+    // C reflects bit 0 of the popped value (0x654321 -> 1).
+    let c = (s.registers[reg::SR] >> sr::C) & 1;
+    assert_eq!(c, 1, "C reflects bit 0 of the popped SSH value");
 }
 
 #[test]
-fn test_jset_ssh_does_not_pop_stack() {
-    // Verify bit ops on SSH don't pop/push.
+fn test_bclr_ssh_no_pop_writes_slot() {
+    // Modifying bit ops on SSH keep SP unchanged and rewrite the top
+    // stack slot in place (hardware-verified).
     // BCLR #0,SSH: 0x0AFC40
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
@@ -1806,6 +1808,12 @@ fn test_jset_ssh_does_not_pop_stack() {
     assert_eq!(
         sp_after, sp_before,
         "BCLR on SSH should not pop/push the stack"
+    );
+    assert_eq!(s.stack[0][2], 0x654320, "top stack slot modified in place");
+    assert_eq!(
+        s.registers[reg::SSH],
+        0x654320,
+        "SSH mirror follows the slot"
     );
 }
 

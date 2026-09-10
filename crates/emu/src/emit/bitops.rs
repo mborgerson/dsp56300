@@ -80,12 +80,25 @@ impl<'a> Emitter<'a> {
     pub(super) fn emit_bit_op_reg(&mut self, reg_idx: u8, bit_num: u8, op: BitOp) {
         self.set_inst_len(1);
         self.set_cycles(2);
-        // Use load_reg/store_reg (not read/write_reg_for_move) because bit
-        // operations are NOT move instructions - they must not trigger SSH
-        // pop/push side effects or accumulator limiting.
-        let val = self.load_reg(reg_idx as usize);
+        // SSH is special (hardware-verified): BTST reads it like a move
+        // source and pops the stack; the modifying ops rewrite the top
+        // stack slot in place without touching SP. Other registers use
+        // load_reg/store_reg (not read/write_reg_for_move) so there is no
+        // accumulator limiting.
+        let is_ssh = reg_idx as usize == reg::SSH;
+        let val = if is_ssh && op == BitOp::Test {
+            self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
+        } else {
+            // For SSH this reads the top-of-stack mirror, kept coherent by
+            // every push/pop.
+            self.load_reg(reg_idx as usize)
+        };
         if let Some(result) = self.apply_bit_op(val, bit_num as u32, op) {
-            self.store_reg(reg_idx as usize, result);
+            if is_ssh {
+                self.emit_call_extern_val(jit_write_ssh_tos as *const () as usize, result);
+            } else {
+                self.store_reg(reg_idx as usize, result);
+            }
         }
         // Per DSP56300FM: for SR target with modifying ops (BCLR/BSET/BCHG),
         // the bit operation itself modifies CCR bits directly, so we must not
