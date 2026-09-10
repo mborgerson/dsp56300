@@ -70,12 +70,15 @@ impl<'a> Emitter<'a> {
                 dest_shifted,
                 result_raw,
                 is_sub,
-                asl_carry,
                 asl_v,
             } => {
                 self.update_nz_now(result56);
+                // C comes from the add/sub stage alone; the destination
+                // shift's carry-out does NOT fold into C (hardware
+                // carry-edge probes: (asl,add) 10->0, 01->1,
+                // 11->1). The shift still contributes V/L via asl_v.
                 self.update_vcl(source, dest_shifted, result_raw, is_sub);
-                self.xor_c_or_vl(asl_carry, asl_v);
+                self.or_vl_sr(asl_v);
                 self.emit_sm_vl_deferred();
             }
             PendingFlags::DmacVl {
@@ -170,7 +173,6 @@ impl<'a> Emitter<'a> {
         dest_shifted: Value,
         result_raw: Value,
         is_sub: bool,
-        asl_carry: Value,
         asl_v: Value,
     ) {
         self.set_pending(PendingFlags::AddlSubl {
@@ -179,7 +181,6 @@ impl<'a> Emitter<'a> {
             dest_shifted,
             result_raw,
             is_sub,
-            asl_carry,
             asl_v,
         });
     }
