@@ -424,6 +424,12 @@ pub struct Emitter<'a> {
     /// start+8 vs start+7 for movec ssh,rN). Set around the affected
     /// read, reset to 0 afterwards.
     fault_anchor_bump: u32,
+    /// Number of fault-arming emissions (`emit_spill_fault_budget` /
+    /// `emit_arm_fault_budget`) so far. `emit_block` snapshots it around
+    /// each instruction: a delta means the instruction can post a core
+    /// fault, and a check-and-bail follows it so the run loop's step path
+    /// charges every subsequent stream word against the armed budget.
+    fault_arm_sites: u32,
     /// Cycles an inline loop may run in one block dispatch before it bails
     /// to the run loop (see `emit_loop_preemption_check`). Fixed for the
     /// engine that built this emitter; only the differential tests move it.
@@ -521,6 +527,7 @@ impl<'a> Emitter<'a> {
             cur_inst_len: 0,
             cur_decode_len: 1,
             fault_anchor_bump: 0,
+            fault_arm_sites: 0,
             loop_quantum: loops::INLINE_LOOP_QUANTUM,
         }
     }
@@ -539,6 +546,7 @@ impl<'a> Emitter<'a> {
     /// they are compile-time constants derived from the opcode alone, so
     /// the opcode-cached single-instruction path needs no runtime PC.
     pub(super) fn emit_spill_fault_budget(&mut self, class: FaultClass) {
+        self.fault_arm_sites += 1;
         let words: u32 = match class {
             FaultClass::Pop => 6 + self.fault_anchor_bump,
             FaultClass::Push => 9u32.saturating_sub(self.cur_decode_len.max(1)),
@@ -562,6 +570,7 @@ impl<'a> Emitter<'a> {
     /// words after the nested ILLEGAL are annulled; see
     /// `InterruptPipeline::parked_countdown`).
     pub(super) fn emit_arm_fault_budget(&mut self, words: u32) {
+        self.fault_arm_sites += 1;
         let bv = self.builder.ins().iconst(types::I32, words as i64);
         self.builder.ins().store(
             Self::flags(),
@@ -569,6 +578,94 @@ impl<'a> Emitter<'a> {
             self.state_ptr,
             OFF_INTERRUPT_FAULT_BUDGET,
         );
+    }
+
+    /// If the instruction just emitted touched a fault-arming site
+    /// (`fault_arm_sites` moved past `mark`), emit a check-and-bail: an
+    /// armed, undelivered core fault (`interrupts.fault_budget` valid)
+    /// returns to the run loop at `resume_pc`, whose step path then
+    /// charges every subsequent stream word against the silicon-probed
+    /// budget. Without this the rest of the block executes uncharged and
+    /// delivery lands late. The check is cheap and cold; delivery resets
+    /// the budget to invalid, so it can only fire between arming and
+    /// delivery.
+    fn emit_fault_arm_bail(&mut self, mark: u32, resume_pc: u32) {
+        if self.fault_arm_sites == mark {
+            return;
+        }
+        // Same shape as the exit-request check: materialize pending flags
+        // and cycles before the branch so the early-return arm drops
+        // nothing (its flush_all_to_memory never runs the pending-flag
+        // computation).
+        self.flush_pending_flags();
+        self.flush_pending_cycles();
+        let fb = self.builder.ins().load(
+            types::I32,
+            Self::flags(),
+            self.state_ptr,
+            OFF_INTERRUPT_FAULT_BUDGET,
+        );
+        // INVALID_FAULT_BUDGET == 0xFFFF_FFFF == -1 as i32.
+        let invalid = self.builder.ins().iconst(types::I32, -1);
+        let armed = self.builder.ins().icmp(IntCC::NotEqual, fb, invalid);
+        let bail = self.builder.create_block();
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(armed, bail, &[], cont, &[]);
+
+        self.builder.switch_to_block(bail);
+        self.builder.seal_block(bail);
+        self.flush_all_to_memory();
+        let ret_cycles = self.builder.use_var(self.total_cycles);
+        let pc_val = self.builder.ins().iconst(types::I32, resume_pc as i64);
+        self.store_pc(pc_val);
+        self.builder.ins().return_(&[ret_cycles]);
+
+        self.builder.switch_to_block(cont);
+        self.builder.seal_block(cont);
+    }
+
+    /// Whether this instruction's emission can post a core fault
+    /// (stack error through SSH/SSL/SP access, or a trap class). These
+    /// are the shapes that reach `emit_spill_fault_budget` /
+    /// `emit_arm_fault_budget` outside their own terminator handling;
+    /// deliberately conservative - a false positive only costs an inline
+    /// loop its eligibility or a REP target its inline form.
+    pub(super) fn may_arm_stack_fault(inst: &Instruction) -> bool {
+        fn stackish(r: u8) -> bool {
+            matches!(r as usize, reg::SP | reg::SSH | reg::SSL)
+        }
+        match inst {
+            Instruction::MovecEa { numreg, .. }
+            | Instruction::MovecAa { numreg, .. }
+            | Instruction::MovemEa { numreg, .. }
+            | Instruction::MovemAa { numreg, .. } => stackish(*numreg),
+            Instruction::MovecReg {
+                src_reg, dst_reg, ..
+            } => stackish(*src_reg) || stackish(*dst_reg),
+            Instruction::MovecImm { dest, .. } => stackish(*dest),
+            Instruction::Movep0 { reg_idx, .. } | Instruction::MovepQqR { reg_idx, .. } => {
+                stackish(*reg_idx)
+            }
+            Instruction::BchgReg { reg_idx, .. }
+            | Instruction::BclrReg { reg_idx, .. }
+            | Instruction::BsetReg { reg_idx, .. }
+            | Instruction::BtstReg { reg_idx, .. }
+            | Instruction::BrclrReg { reg_idx, .. }
+            | Instruction::BrsetReg { reg_idx, .. }
+            | Instruction::BsclrReg { reg_idx, .. }
+            | Instruction::BssetReg { reg_idx, .. }
+            | Instruction::JclrReg { reg_idx, .. }
+            | Instruction::JsetReg { reg_idx, .. }
+            | Instruction::JsclrReg { reg_idx, .. }
+            | Instruction::JssetReg { reg_idx, .. } => stackish(*reg_idx),
+            Instruction::EndDo
+            | Instruction::Rts
+            | Instruction::Rti
+            | Instruction::Trap
+            | Instruction::Trapcc { .. }
+            | Instruction::Illegal => true,
+            _ => false,
+        }
     }
 
     /// Emit IR for a single decoded instruction.
@@ -1697,6 +1794,27 @@ impl<'a> Emitter<'a> {
 
             // REP: compile as inline Cranelift loop instead of block terminator
             if Self::is_rep_instruction(&inst) {
+                let target = decode::decode(self.map.read_pram(mask_pc(pc + 1)));
+                // A target that can arm a core fault would iterate
+                // uncharged inside the inline loop, and a REP/DO target is
+                // a manual-restricted shape the inline form scrambles
+                // (emit_rep_inline would emit the legacy REP setup inside
+                // its own loop). Both fall back to the legacy loop_rep
+                // machinery: emit the REP itself plus the step path's
+                // first-call arm (advance_pc's pc_on_rep handling,
+                // zero-count annul included) and end the block - the run
+                // loop steps while loop_rep is live, which is the step
+                // leg's exact semantics.
+                if Self::may_arm_stack_fault(&target)
+                    || Self::is_rep_instruction(&target)
+                    || Self::is_do_instruction(&target)
+                {
+                    self.emit_instruction(&inst, pc, next_word);
+                    self.emit_rep_first_call_arm(pc);
+                    pc += inst_len;
+                    ended_with_terminator = true;
+                    break;
+                }
                 self.emit_rep_inline(&inst, pc);
                 // REP consumes itself (1 word) + the repeated instruction
                 let rep_inst_pc = pc + 1;
@@ -1738,10 +1856,19 @@ impl<'a> Emitter<'a> {
                 let check_exit = Self::needs_exit_check(&inst);
 
                 // Emit the instruction IR
+                let arm_mark = self.fault_arm_sites;
                 self.emit_instruction(&inst, pc, next_word);
 
                 count += 1;
                 pc += inst_len;
+
+                // A non-terminator that can arm a core fault hands the
+                // rest of the stream back to the run loop when one armed:
+                // the armed budget counts stream words from here, and
+                // in-block execution would leave them uncharged.
+                if !is_terminator {
+                    self.emit_fault_arm_bail(arm_mark, pc);
+                }
 
                 // After peripheral-writing instructions, check exit_requested.
                 // The peripheral callback sets exit_requested (via
