@@ -80,6 +80,139 @@ impl CodeCache {
     }
 }
 
+/// What one start PC cost, accumulated as it runs.
+///
+/// `words` sums each dispatch's `end_pc - pc`: the cache entry at dump time
+/// is a different question (the PC may have been evicted, or recompiled over
+/// an overlay load with a different extent), and reading the extent from
+/// there reports every such PC as a one-word block.
+///
+/// `ticks` is the reason this exists. Hits and cycles say how much guest
+/// work a PC did, not what it cost the host, and the two disagree: a hot
+/// loop can be a third of the cycles while hundreds of other blocks share
+/// the rest at some average nobody has measured. Guest cycles are a
+/// constant per instruction; host time is not.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct BlockStat {
+    hits: u64,
+    cycles: u64,
+    words: u64,
+    ticks: u64,
+}
+
+/// Host time the run loop spends around compiled code, split by phase.
+///
+/// Global counters, not per-PC: the loop is the same code for every block,
+/// and the question it answers is what a dispatch pays outside the block -
+/// the residual the per-block profile can only report as a gap against the
+/// caller's wall clock. Phases cover the whole loop iteration, so their sum
+/// plus block time is the loop's cost and nothing is left to inference.
+#[derive(Clone, Copy, Default)]
+struct DispatchStat {
+    /// Iterations that dispatched a compiled block.
+    iters: u64,
+    /// Loop top to the block call: power checks, stop_pc, the dirty/evict
+    /// check, the cache lookup. Compile time is carved out into
+    /// `compile_ticks`, so this is the price every dispatch pays.
+    pre_ticks: u64,
+    /// Block return to iteration end: mode check, DO loop-back, pending
+    /// interrupts.
+    post_ticks: u64,
+    /// get_or_compile_block plus the invalidation that may follow, and how
+    /// many dispatches paid it. Covers both fresh compiles and rebuilds
+    /// from retained translations.
+    compile_ticks: u64,
+    compile_count: u64,
+    /// Single-step fallback iterations (interrupt pipeline, PC outside
+    /// PRAM), timed loop top to their continue.
+    step_ticks: u64,
+    step_count: u64,
+}
+
+/// Per-PC block statistics plus what it takes to read the clock they use.
+struct BlockProfile {
+    stats: Vec<BlockStat>,
+    /// Where the loop's time goes when it is not inside a block.
+    dispatch: DispatchStat,
+    /// Nanoseconds per `read_ticks()` unit, 0 when this target has no
+    /// cheap counter and every `ticks` is 0.
+    ns_per_tick: f64,
+    /// What an empty timed region reads, in ticks. Both reads of the pair
+    /// land partly inside the interval they bracket, so every dispatch is
+    /// biased up by roughly this much; the dump subtracts `hits * probe`
+    /// and reports the correction so it can be checked rather than trusted.
+    probe_ticks: u64,
+}
+
+/// A cheap monotonic counter, read twice around each block dispatch.
+///
+/// Not serialising: the CPU may move a read past neighbouring work. The
+/// indirect call to compiled code sits between the pair and does not get
+/// reordered around, and the calibration probe uses the same instruction
+/// pair, so the bias it leaves is the one `probe_ticks` measures.
+#[inline(always)]
+fn read_ticks() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: rdtsc is unprivileged and reads no memory.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let v: u64;
+        // SAFETY: CNTVCT_EL0 is readable from EL0 and has no side effects.
+        unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v) };
+        v
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        0
+    }
+}
+
+impl BlockProfile {
+    fn new(pram_size: usize) -> Self {
+        let (ns_per_tick, probe_ticks) = if read_ticks() == 0 {
+            (0.0, 0)
+        } else {
+            (Self::calibrate_rate(), Self::calibrate_probe())
+        };
+        BlockProfile {
+            stats: vec![BlockStat::default(); pram_size],
+            dispatch: DispatchStat::default(),
+            ns_per_tick,
+            probe_ticks,
+        }
+    }
+
+    /// Nanoseconds per tick, from a millisecond of wall clock. Paid once,
+    /// when profiling is switched on.
+    fn calibrate_rate() -> f64 {
+        let t0 = read_ticks();
+        let w0 = std::time::Instant::now();
+        while w0.elapsed() < std::time::Duration::from_millis(1) {
+            std::hint::spin_loop();
+        }
+        let ns = w0.elapsed().as_nanos() as f64;
+        let ticks = read_ticks().wrapping_sub(t0) as f64;
+        if ticks > 0.0 { ns / ticks } else { 0.0 }
+    }
+
+    /// What a timed region costs when it contains nothing. The minimum of
+    /// many, not the mean: an interrupt landing inside the probe inflates
+    /// it, and an over-estimate here would subtract real time from every
+    /// block in the dump.
+    fn calibrate_probe() -> u64 {
+        let mut best = u64::MAX;
+        for _ in 0..1000 {
+            let t0 = read_ticks();
+            let t1 = read_ticks();
+            best = best.min(t1.wrapping_sub(t0));
+        }
+        best
+    }
+}
+
 /// JIT compilation engine.
 pub struct JitEngine {
     module: Option<JITModule>,
@@ -95,8 +228,8 @@ pub struct JitEngine {
     perf_map: Option<std::fs::File>,
     /// Number of PRAM words (determines cache and profile array sizes).
     pram_size: usize,
-    /// Block execution profiler: \[hit_count, total_cycles\] per PC.
-    block_profile: Option<Vec<(u64, u64)>>,
+    /// Block execution profiler, one entry per PC. See `BlockProfile`.
+    block_profile: Option<BlockProfile>,
     /// Translations kept past invalidation, keyed by the code itself.
     /// Key: (start_pc, stop_pc) -> candidates (the words translated, function).
     translations: HashMap<(u32, u32), Vec<Translation>>,
@@ -250,10 +383,11 @@ impl JitEngine {
     #[cfg(not(target_os = "linux"))]
     pub fn enable_perf_map(&mut self) {}
 
-    /// Enable block execution profiling (hit counts and cycle totals per PC).
+    /// Enable block execution profiling (hits, cycles, extent and host time
+    /// per PC). Calibrates the clock, so it costs a millisecond.
     pub fn enable_profiling(&mut self) {
         if self.block_profile.is_none() {
-            self.block_profile = Some(vec![(0u64, 0u64); self.pram_size]);
+            self.block_profile = Some(BlockProfile::new(self.pram_size));
         }
     }
 
@@ -323,50 +457,126 @@ impl JitEngine {
         self.instr_cache.retain(|&(pc, _, _), _| pc < lo || pc > hi);
     }
 
-    /// Dump block execution profile to a file, sorted by total cycles descending.
-    /// Each line: pc_range, hits, total_cycles, avg_cycles, disassembly of first instruction.
+    /// Dump the block execution profile to a file, ordered by host time
+    /// where the target has a counter to read and by guest cycles where it
+    /// does not. Each line: pc and mean extent, hits, cycles, host ns, and
+    /// the two rates that separate a block that runs often from one that
+    /// runs slowly.
     pub fn dump_profile(&self, map: &MemoryMap, path: &str) {
         let Some(ref profile) = self.block_profile else {
             return;
         };
-        let mut entries: Vec<(u32, u64, u64)> = profile
+        let mut entries: Vec<(u32, BlockStat)> = profile
+            .stats
             .iter()
             .enumerate()
-            .filter(|(_, (hits, _))| *hits > 0)
-            .map(|(pc, (hits, cycles))| (pc as u32, *hits, *cycles))
+            .filter(|(_, s)| s.hits > 0)
+            .map(|(pc, s)| (pc as u32, *s))
             .collect();
-        entries.sort_by_key(|a| std::cmp::Reverse(a.2));
+        // By host time where there is a clock: the whole question this
+        // answers is which blocks carry the nanoseconds, and cycles are
+        // exactly the answer that does not distinguish them.
+        let timed = profile.ns_per_tick > 0.0;
+        if timed {
+            entries.sort_by_key(|(_, s)| std::cmp::Reverse(s.ticks));
+        } else {
+            entries.sort_by_key(|(_, s)| std::cmp::Reverse(s.cycles));
+        }
 
-        let total_cycles: u64 = entries.iter().map(|(_, _, c)| c).sum();
+        let total_cycles: u64 = entries.iter().map(|(_, s)| s.cycles).sum();
+        let total_hits: u64 = entries.iter().map(|(_, s)| s.hits).sum();
+        let total_ticks: u64 = entries.iter().map(|(_, s)| s.ticks).sum();
+        // The clock reads are the profiler's own cost, not the guest's.
+        let probe = profile.probe_ticks;
+        let net = |s: &BlockStat| s.ticks.saturating_sub(s.hits * probe);
+        let total_net: u64 = entries.iter().map(|(_, s)| net(s)).sum();
+        let ns = |t: u64| t as f64 * profile.ns_per_tick;
+
         let mut f = match std::fs::File::create(path) {
             Ok(f) => f,
             Err(_) => return,
         };
         let _ = writeln!(
             f,
-            "{:<20} {:>10} {:>14} {:>8} {:>6}  first_insn",
-            "block", "hits", "cycles", "avg", "pct"
+            "{:<24} {:>10} {:>14} {:>8} {:>6} {:>12} {:>8} {:>8}",
+            "block", "hits", "cycles", "avg", "pct", "ns", "ns/disp", "ns/cyc"
         );
-        let _ = writeln!(f, "{}", "-".repeat(80));
-        for (pc, hits, cycles) in &entries {
-            let end_pc = self.cache.blocks[*pc as usize]
-                .as_ref()
-                .map(|b| b.end_pc)
-                .unwrap_or(*pc + 1);
-            let pct = (*cycles as f64 / total_cycles as f64) * 100.0;
+        let _ = writeln!(f, "{}", "-".repeat(100));
+        for (pc, s) in &entries {
+            // Words per dispatch is the mean of what actually ran, not the
+            // extent of whatever block happens to sit at this PC now.
+            let avg_words = s.words as f64 / s.hits as f64;
+            let pct = if timed && total_net > 0 {
+                (net(s) as f64 / total_net as f64) * 100.0
+            } else {
+                (s.cycles as f64 / total_cycles.max(1) as f64) * 100.0
+            };
+            let block_ns = ns(net(s));
             let _ = writeln!(
                 f,
-                "{:04x}..{:04x} ({:2} insn)  {:>10} {:>14} {:>8} {:>5.1}%",
+                "{:04x}+{:<6.2}w            {:>10} {:>14} {:>8} {:>5.1}% {:>12.0} {:>8.1} {:>8.2}",
                 pc,
-                end_pc,
-                end_pc - pc,
-                hits,
-                cycles,
-                cycles / hits.max(&1),
+                avg_words,
+                s.hits,
+                s.cycles,
+                s.cycles / s.hits.max(1),
                 pct,
+                block_ns,
+                block_ns / s.hits as f64,
+                block_ns / s.cycles.max(1) as f64,
             );
         }
         let _ = writeln!(f, "\ntotal_cycles: {}", total_cycles);
+        if timed {
+            // The correction is reported, not just applied: it is a
+            // per-dispatch constant, so it lands hardest on exactly the
+            // short blocks this dump exists to weigh, and a reader has to
+            // be able to see how much of the answer it is.
+            let _ = writeln!(
+                f,
+                "total_ns: {:.0}\nns_per_cycle: {:.3}\n\
+                 profiler_probe_ns: {:.0} ({:.1}% of {:.0} raw, {:.2} ns x {} dispatches)",
+                ns(total_net),
+                ns(total_net) / total_cycles.max(1) as f64,
+                ns(total_ticks - total_net),
+                if total_ticks > 0 {
+                    ((total_ticks - total_net) as f64 / total_ticks as f64) * 100.0
+                } else {
+                    0.0
+                },
+                ns(total_ticks),
+                ns(probe),
+                total_hits,
+            );
+            // Block time is the time inside compiled code. Everything the
+            // run loop does between dispatches is timed on its own, split
+            // by phase, so the dispatch overhead reads as numbers rather
+            // than a residual against the caller's wall clock. Totals are
+            // cumulative like the block table; difference two dumps for a
+            // window. Same probe correction, same reporting of it.
+            let d = &profile.dispatch;
+            let dnet = |t: u64, n: u64| t.saturating_sub(n * probe);
+            let per = |t: u64, n: u64| ns(dnet(t, n)) / n.max(1) as f64;
+            let _ = writeln!(
+                f,
+                "dispatch_pre_ns: {:.0} ({} dispatches, {:.2} ns/disp)\n\
+                 dispatch_post_ns: {:.0} ({:.2} ns/disp)\n\
+                 dispatch_compile_ns: {:.0} ({} compiles, {:.0} ns/compile)\n\
+                 dispatch_step_ns: {:.0} ({} steps)",
+                ns(dnet(d.pre_ticks, d.iters)),
+                d.iters,
+                per(d.pre_ticks, d.iters),
+                ns(dnet(d.post_ticks, d.iters)),
+                per(d.post_ticks, d.iters),
+                ns(dnet(d.compile_ticks, d.compile_count)),
+                d.compile_count,
+                per(d.compile_ticks, d.compile_count),
+                ns(dnet(d.step_ticks, d.step_count)),
+                d.step_count,
+            );
+        } else {
+            let _ = writeln!(f, "total_ns: unavailable (no cycle counter on this target)");
+        }
         // Why blocks end, cumulative over the engine's life. Differenced
         // between two dumps these say how many dispatches the instruction
         // cap and the DO-loop boundary each create.
@@ -381,20 +591,27 @@ impl JitEngine {
         let _ = writeln!(f, "P-SPACE DUMP OF TOP 20 BLOCKS");
         let _ = writeln!(f, "{}", "=".repeat(80));
         let p_end = map.p_space_end();
-        for (pc, _hits, cycles) in entries.iter().take(20) {
-            let end_pc = self.cache.blocks[*pc as usize]
+        for (pc, st) in entries.iter().take(20) {
+            // Dump the widest extent this PC is known to have run with: the
+            // mean rounded up, or the live cache entry if it reaches further
+            // (a block recompiled since, or one preempted short of its end).
+            let avg_words = (st.words as f64 / st.hits as f64).ceil() as u32;
+            let cached_end = self.cache.blocks[*pc as usize]
                 .as_ref()
                 .map(|b| b.end_pc)
-                .unwrap_or(*pc + 1);
-            let pct = (*cycles as f64 / total_cycles as f64) * 100.0;
+                .unwrap_or(0);
+            let end_pc = cached_end.max(pc + avg_words.max(1));
+            let pct = (st.cycles as f64 / total_cycles.max(1) as f64) * 100.0;
             let _ = writeln!(
                 f,
-                "\n=== Block {:04x}..{:04x} ({} words, {:.1}%, {} cycles) ===",
+                "\n=== Block {:04x}..{:04x} ({:.2} words/dispatch, {:.1}% of cycles, \
+                 {} cycles, {:.0} ns) ===",
                 pc,
                 end_pc,
-                end_pc - pc,
+                st.words as f64 / st.hits as f64,
                 pct,
-                cycles,
+                st.cycles,
+                ns(net(st)),
             );
             for addr in *pc..end_pc.min(p_end) {
                 let _ = writeln!(f, "P {:04X} {:06X}", addr, map.read_pram(addr));
@@ -734,6 +951,12 @@ impl DspState {
         self.cycle_budget += cycles;
 
         while self.cycle_budget > 0 && !self.halt_requested {
+            // One read at the top of every iteration when profiling: the
+            // pre/step phases start here, so the loop's own checks are
+            // inside a timed region rather than a residual.
+            let profiling = jit.block_profile.is_some();
+            let t_top = if profiling { read_ticks() } else { 0 };
+
             // STOP: all clocks halted, nothing happens until external RESET.
             if self.power_state == PowerState::Stop {
                 self.cycle_budget = 0;
@@ -767,6 +990,10 @@ impl DspState {
             if self.interrupts.state != InterruptState::None {
                 let consumed = self.step_one(jit);
                 self.cycle_budget -= consumed;
+                if let Some(ref mut profile) = jit.block_profile {
+                    profile.dispatch.step_count += 1;
+                    profile.dispatch.step_ticks += read_ticks().wrapping_sub(t_top);
+                }
                 continue;
             }
 
@@ -776,6 +1003,10 @@ impl DspState {
             if pc as usize >= jit.pram_size {
                 let consumed = self.step_one(jit);
                 self.cycle_budget -= consumed;
+                if let Some(ref mut profile) = jit.block_profile {
+                    profile.dispatch.step_count += 1;
+                    profile.dispatch.step_ticks += read_ticks().wrapping_sub(t_top);
+                }
                 continue;
             }
 
@@ -799,7 +1030,14 @@ impl DspState {
                 }
             }
 
+            // Time the compile path apart from the steady-state lookup: a
+            // program that pages overlays rebuilds tens of thousands of
+            // cache entries a second where a resident one rebuilds none,
+            // and folding that into `pre` would blur the asymmetry this
+            // split exists to weigh.
+            let mut compile_ticks_here = 0u64;
             if jit.cache.blocks[pc as usize].is_none() {
+                let tc0 = if profiling { read_ticks() } else { 0 };
                 let block =
                     jit.get_or_compile_block(pc, stop_pc, self.pram_dirty.generation, &self.map);
                 // The dirty bits are shared by every block covering these
@@ -817,6 +1055,11 @@ impl DspState {
                     self.pram_dirty.clear_dirty_range(pc, block.end_pc);
                 }
                 jit.cache.blocks[pc as usize] = Some(block);
+                if let Some(ref mut profile) = jit.block_profile {
+                    compile_ticks_here = read_ticks().wrapping_sub(tc0);
+                    profile.dispatch.compile_count += 1;
+                    profile.dispatch.compile_ticks += compile_ticks_here;
+                }
             }
 
             let block = jit.cache.blocks[pc as usize].unwrap();
@@ -829,12 +1072,23 @@ impl DspState {
             } else if block.ends_open {
                 jit.stats.block_ends_open += 1;
             }
+            // Bracket the call and nothing else: what the dispatch around
+            // it costs is timed on its own in `dispatch`, and folding it
+            // in here would hide it.
+            let t0 = if profiling { read_ticks() } else { 0 };
             let consumed = unsafe { (block.func)(self as *mut DspState) };
+            let t1 = if profiling { read_ticks() } else { 0 };
             self.exit_requested = false;
 
             if let Some(ref mut profile) = jit.block_profile {
-                profile[pc as usize].0 += 1;
-                profile[pc as usize].1 += consumed as u64;
+                let stat = &mut profile.stats[pc as usize];
+                stat.hits += 1;
+                stat.cycles += consumed as u64;
+                stat.words += (block.end_pc - pc) as u64;
+                stat.ticks += t1.wrapping_sub(t0);
+                profile.dispatch.iters += 1;
+                profile.dispatch.pre_ticks +=
+                    t0.wrapping_sub(t_top).saturating_sub(compile_ticks_here);
             }
 
             self.cycle_count += consumed as u32;
@@ -868,6 +1122,10 @@ impl DspState {
             }
 
             self.process_pending_interrupts();
+
+            if let Some(ref mut profile) = jit.block_profile {
+                profile.dispatch.post_ticks += read_ticks().wrapping_sub(t1);
+            }
         }
     }
 }
@@ -1294,8 +1552,45 @@ mod tests {
 
         // Profile should have recorded hits at PC 0.
         let profile = jit.block_profile.as_ref().unwrap();
-        assert!(profile[0].0 > 0, "expected hits > 0");
-        assert!(profile[0].1 > 0, "expected cycles > 0");
+        let s0 = profile.stats[0];
+        assert!(s0.hits > 0, "expected hits > 0");
+        assert!(s0.cycles > 0, "expected cycles > 0");
+        // [NOP, JMP] is two words, every dispatch.
+        assert_eq!(s0.words, s0.hits * 2, "expected 2 words/dispatch");
+        // Host time is recorded where there is a counter to read.
+        if profile.ns_per_tick > 0.0 {
+            assert!(s0.ticks > 0, "expected host ticks > 0");
+        }
+    }
+
+    #[test]
+    fn test_profile_words_survive_recompilation() {
+        // The extent is recorded per dispatch, so a PC that later hosts a
+        // block of a different length still reports what actually ran.
+        // Reading it back from the cache at dump time cannot do this:
+        // overlay loads recompile hot PCs to different extents, and an
+        // evicted PC has no entry to read at all.
+        let mut jit = JitEngine::new(PRAM_SIZE);
+        jit.enable_profiling();
+        let mut xram = [0u32; XRAM_SIZE];
+        let mut yram = [0u32; YRAM_SIZE];
+        let mut pram = [0u32; PRAM_SIZE];
+        let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+        pram[0] = 0x000008; // inc A  (1 cycle)
+        pram[1] = 0x000008; // inc A
+        pram[2] = 0x0C0000; // jmp $0 (3 cycles)
+        s.run(&mut jit, 5); // one dispatch of the 3-word block
+        let s0 = jit.block_profile.as_ref().unwrap().stats[0];
+        assert_eq!((s0.hits, s0.cycles, s0.words), (1, 5, 3));
+
+        // Shorten the block at PC 0 and run it again.
+        s.pc = 0;
+        pram[1] = 0x0C0000; // jmp $0 at word 1
+        jit.invalidate_cache();
+        s.run(&mut jit, 4); // one dispatch of the 2-word block
+        let s0 = jit.block_profile.as_ref().unwrap().stats[0];
+        assert_eq!(s0.hits, 2);
+        assert_eq!(s0.words, 5, "3-word dispatch + 2-word dispatch");
     }
 
     #[test]
