@@ -773,6 +773,22 @@ fn encode_bit_op(
     }
 }
 
+/// Bit-test branches have no absolute-long or immediate ea form: their
+/// extension word is the branch target, and the mode-6 code points of these
+/// opcode rows encode MOVE X:/Y:(Rn+xxxx) (jclr/jset/jsclr/jsset) or are
+/// unallocated (brclr/brset/bsclr/bsset). The official assembler rejects
+/// these with "Absolute address must be either short or I/O short".
+fn reject_bit_branch_mode6_ea(ea: &EffectiveAddress) -> Result<()> {
+    match ea {
+        EffectiveAddress::AbsAddr(_)
+        | EffectiveAddress::ForceLongAbsAddr(_)
+        | EffectiveAddress::Immediate(_) => Err(enc_err(
+            "bit branch address must be a short absolute or I/O short address",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn encode_bit_branch(
     op_code: u32,
     bit: &Expr,
@@ -832,17 +848,15 @@ fn encode_bit_branch(
                             | numbit,
                         ext_word,
                     ))
-                } else if addr_val == ext_word {
-                    let ea_bits = 0b110_000u32;
-                    Ok(words(
-                        0x0C8000 | (bs << 16) | (ea_bits << 8) | (s << 6) | (set_bit << 5) | numbit,
-                        ext_word,
-                    ))
                 } else {
+                    // No absolute-long form exists: the mode-6 encoding of
+                    // this row is unallocated (the official assembler says
+                    // "Absolute address must be either short or I/O short").
                     Err(enc_err("bit branch address must be in pp, qq, or aa range"))
                 }
             }
             BitTarget::Ea { space, ea } => {
+                reject_bit_branch_mode6_ea(ea)?;
                 let (ea_bits, _) = encode_ea(ea, sym, pc)?;
                 let s = ast_space_bit(*space);
                 Ok(words(
@@ -898,17 +912,16 @@ fn encode_bit_branch(
                             | numbit,
                         ext_word,
                     ))
-                } else if addr_val == ext_word {
-                    let ea_bits = 0b110_000u32;
-                    Ok(words(
-                        0x0A4080 | js | (ea_bits << 8) | (s << 6) | (set_bit << 5) | numbit,
-                        ext_word,
-                    ))
                 } else {
+                    // No absolute-long form exists: the mode-6 encoding of
+                    // this row belongs to MOVE X:/Y:(Rn+xxxx) (the official
+                    // assembler says "Absolute address must be either short
+                    // or I/O short").
                     Err(enc_err("bit branch address must be in pp, qq, or aa range"))
                 }
             }
             BitTarget::Ea { space, ea } => {
+                reject_bit_branch_mode6_ea(ea)?;
                 let (ea_bits, _) = encode_ea(ea, sym, pc)?;
                 let s = ast_space_bit(*space);
                 Ok(words(
@@ -978,10 +991,10 @@ fn encode_do_dor_inner(
                     0x060000 | off | ((a & 0x3F) << 8) | (s << 6),
                     ext_word,
                 ))
-            } else if a == ext_word {
-                let ea_bits = 0b110_000u32;
-                Ok(words(0x064000 | off | (ea_bits << 8) | (s << 6), ext_word))
             } else {
+                // No absolute-long form: the mode-6 encoding of the DO/DOR
+                // row is unallocated (the loop-address extension word is
+                // already in use).
                 Err(enc_err(&format!(
                     "{mnem}: absolute address exceeds 6-bit aa range ($0000-$003f)"
                 )))
@@ -997,6 +1010,13 @@ fn encode_do_dor_inner(
                         ext_word,
                     ));
                 }
+                // No absolute-long form (mode-6 row is unallocated).
+                return Err(enc_err(&format!(
+                    "{mnem}: absolute address exceeds 6-bit aa range ($0000-$003f)"
+                )));
+            }
+            if let EffectiveAddress::Immediate(_) = ea {
+                return Err(enc_err(&format!("{mnem}: immediate ea is not valid")));
             }
             let (ea_bits, _) = encode_ea(ea, sym, pc)?;
             Ok(words(
@@ -1024,15 +1044,31 @@ fn encode_rep(source: &RepSource, sym: &SymbolTable, pc: u32) -> Result<EncodedI
             if a <= 0x3F {
                 Ok(word(0x060020 | ((a & 0x3F) << 8) | (s << 6)))
             } else {
-                let ea_bits = 0b110_000u32;
-                Ok(words(0x064020 | (ea_bits << 8) | (s << 6), a & 0xFFFFFF))
+                // REP is a single-word instruction; there is no extension
+                // word to hold an absolute-long address (mode-6 row is
+                // unallocated).
+                Err(enc_err(
+                    "rep: absolute address exceeds 6-bit aa range ($0000-$003f)",
+                ))
             }
         }
         RepSource::Ea { space, ea } => {
-            let (ea_bits, ext) = encode_ea(ea, sym, pc)?;
+            if let EffectiveAddress::AbsAddr(expr) | EffectiveAddress::ForceLongAbsAddr(expr) = ea {
+                let a = eval(expr, sym, pc)?;
+                let s = ast_space_bit(*space);
+                if a <= 0x3F {
+                    return Ok(word(0x060020 | ((a & 0x3F) << 8) | (s << 6)));
+                }
+                return Err(enc_err(
+                    "rep: absolute address exceeds 6-bit aa range ($0000-$003f)",
+                ));
+            }
+            if let EffectiveAddress::Immediate(_) = ea {
+                return Err(enc_err("rep: immediate ea is not valid"));
+            }
+            let (ea_bits, _) = encode_ea(ea, sym, pc)?;
             let s = ast_space_bit(*space);
-            let w0 = 0x064020 | ((ea_bits as u32) << 8) | (s << 6);
-            Ok(with_ext(w0, ext))
+            Ok(word(0x064020 | ((ea_bits as u32) << 8) | (s << 6)))
         }
     }
 }

@@ -629,6 +629,10 @@ impl<'a> Emitter<'a> {
                 }
             }
             BitTestAddr::Ea { space, ea_mode } => {
+                // Mode-6 (absolute/immediate) never reaches here: the
+                // decoder resolves those code points to MOVE (Rn+xxxx)
+                // or Unknown (see no_mode6 in the opcode table), so the
+                // wrapper's next_word=0 is fine.
                 let (ea_addr, _) = self.emit_calc_ea(ea_mode as u32);
                 self.read_mem_dyn(space, ea_addr)
             }

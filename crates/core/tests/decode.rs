@@ -1208,6 +1208,60 @@ fn test_decode_move_long() {
 }
 
 #[test]
+fn test_decode_move_long_wins_bit_branch_mode6_collision() {
+    // The jclr/jset/jsclr/jsset-ea templates with MMM=110 are bit-identical
+    // to MOVE X:/Y:(Rn+xxxx) <-> R; the MOVE owns those code points.
+    // Ground truth: Motorola's asm56300 emits 0B70C4 000C08 for
+    // "move y:(r0+$c08),x0", sim56300 disassembles/executes it as that
+    // move, and the assembler rejects the jsclr reading ("Absolute address
+    // must be either short or I/O short").
+    for (opc, space, w, rrr, numreg) in [
+        (0x0B70C4u32, MemSpace::Y, true, 0u8, 0x04u8), // move y:(r0+xxxx),x0
+        (0x0A70C4, MemSpace::X, true, 0, 0x04),        // move x:(r0+xxxx),x0
+        (0x0B7084, MemSpace::Y, false, 0, 0x04),       // move x0,y:(r0+xxxx)
+        (0x0B74C4, MemSpace::Y, true, 4, 0x04),        // move y:(r4+xxxx),x0
+    ] {
+        match decode(opc) {
+            Instruction::MoveLongDisp {
+                space: s,
+                w: w2,
+                offreg_idx,
+                numreg: n,
+            } => {
+                assert_eq!(s, space, "opcode {opc:06X}");
+                assert_eq!(w2, w, "opcode {opc:06X}");
+                assert_eq!(offreg_idx, rrr, "opcode {opc:06X}");
+                assert_eq!(n, numreg, "opcode {opc:06X}");
+            }
+            other => panic!("expected MoveLongDisp for {opc:06X}, got {other:?}"),
+        }
+        assert_eq!(instruction_length(&decode(opc)), 2);
+    }
+}
+
+#[test]
+fn test_decode_mode6_unallocated_rows_are_unknown() {
+    // brclr/brset/bsclr/bsset/DO/DOR/REP ea forms have no MMM=110
+    // encoding: their extension word is already the branch/loop address
+    // (REP has none at all). sim56300 disassembles these words as `dc`.
+    for opc in [
+        0x0CB044u32, // brclr-ea template, MMM=110 RRR=000
+        0x0CB064,    // brset-ea template, MMM=110
+        0x0DB044,    // bsclr-ea template, MMM=110
+        0x0DB064,    // bsset-ea template, MMM=110
+        0x067040,    // do y:ea template, MMM=110
+        0x067050,    // dor y:ea template, MMM=110
+        0x067060,    // rep y:ea template, MMM=110
+    ] {
+        assert!(
+            matches!(decode(opc), Instruction::Unknown { .. }),
+            "expected Unknown for {opc:06X}, got {:?}",
+            decode(opc)
+        );
+    }
+}
+
+#[test]
 fn test_decode_move_imm() {
     // X space
     let opc = make_opcode(
@@ -1794,7 +1848,8 @@ fn test_instruction_length() {
     assert_eq!(instruction_length(&decode(0x0CC020)), 2); // brset pp
 
     // 2-word: move X long
-    assert_eq!(instruction_length(&decode(0x0A7080)), 2); // move X:(Rn + xxxx)
+    // (0x0A7080 has DDDDDD=000000, an invalid register -> Unknown; use X0)
+    assert_eq!(instruction_length(&decode(0x0A70C4)), 2); // move X:(Rn + xxxx)
 
     // 2-word: mpyi
     assert_eq!(instruction_length(&decode(0x0141C0)), 2); // mpyi #xxxx,S,D

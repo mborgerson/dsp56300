@@ -149,8 +149,9 @@ fn test_move_x_long_read() {
     // move X:(R1+xxxx),X0  W=1
     // encoding: 0000101001110RRR1WDDDDDD
     // R1(RRR=001), W=1, D=X0(0x04): 0x0A71C4
-    // Note: must use R1+ (not R0) to avoid decode collision with jclr_ea
-    // (MMM=110, RRR=0 is "absolute short" addressing in jclr_ea)
+    // (R0 works too — the apparent overlap with the jclr-ea template at
+    // MMM=110/RRR=0 is resolved in MOVE's favor by the decoder; see
+    // test_move_long_disp_r0_wins_jsclr_ea_collision.)
     let mut jit = JitEngine::new(PRAM_SIZE);
     let mut xram = [0u32; XRAM_SIZE];
     let mut yram = [0u32; YRAM_SIZE];
@@ -3183,6 +3184,53 @@ fn test_move_long_disp_negative() {
         0xBEEF42,
         "should read from X:(R1-5)=X:$FB"
     );
+}
+
+#[test]
+fn test_move_long_disp_r0_wins_jsclr_ea_collision() {
+    // The word 0B70C4 matches both the jsclr-ea template with
+    // MMM=110/RRR=000 ("absolute" ea) and MOVE Y:(Rn+xxxx),D; the MOVE
+    // owns that mode-6 row. Motorola's asm56300 emits exactly the pair
+    // 0B70C4 000C08 for "move y:(r0+$c08),x0", and sim56300 disassembles
+    // and executes it as that move (verified: with r0=5 and
+    // y:$c0d=$123456 it loads x0=$123456, pc+=2, and never branches
+    // regardless of the bit at y:$c08).
+    // Template: 0000101s01110RRR1WDDDDDD, s=1 (Y), RRR=0, W=1, D=X0.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::R0] = 5;
+    yram[0x40D] = 0x123456; // r0 + displacement
+    yram[0x408] = 0x000000; // decoy at the raw displacement; bit 4 clear,
+    yram[0] = 0x000000; // so a misdecoded jsclr would branch to $408
+    pram[0] = 0x0B70C4; // move y:(r0+xxxx),x0
+    pram[1] = 0x000408;
+    run_one(&mut s, &mut jit);
+    assert_eq!(s.registers[reg::X0], 0x123456, "x0 should load y:(r0+$408)");
+    assert_eq!(s.pc, 2, "move falls through; must not branch");
+    assert_eq!(s.registers[reg::SP] & 0xF, 0, "no stack push");
+    assert_eq!(s.registers[reg::R0], 5, "r0 unmodified");
+}
+
+#[test]
+fn test_move_long_disp_r0_write_wins_jsclr_ea_collision() {
+    // W=0 twin of a production encoding: 0x0B7084 = move x0,y:(r0+xxxx). Also
+    // matches the jsclr-ea template (S=0, X-space bit test) but must
+    // decode as the MOVE.
+    let mut jit = JitEngine::new(PRAM_SIZE);
+    let mut xram = [0u32; XRAM_SIZE];
+    let mut yram = [0u32; YRAM_SIZE];
+    let mut pram = [0u32; PRAM_SIZE];
+    let mut s = DspState::new(MemoryMap::test(&mut xram, &mut yram, &mut pram));
+    s.registers[reg::R0] = 2;
+    s.registers[reg::X0] = 0xABCDEF;
+    pram[0] = 0x0B7084; // move x0,y:(r0+xxxx)
+    pram[1] = 0x000408;
+    run_one(&mut s, &mut jit);
+    assert_eq!(yram[0x40A], 0xABCDEF, "y:(r0+$408) should hold x0");
+    assert_eq!(s.pc, 2);
 }
 
 #[test]
