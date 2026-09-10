@@ -14,6 +14,10 @@ categories = ["emulators"]
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
+# Test-only: lets a JitEngine be built with a non-default inline-loop
+# preemption quantum, so the slice/preemption differential tests can compare
+# a fully inline loop against a preempted one in the same process.
+tunable-loop-quantum = []
 
 [dependencies]
 dsp56300-core = { version = "0.1.0", path = "../core" }

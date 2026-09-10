@@ -41,6 +41,7 @@ mod control;
 mod flags;
 mod logical;
 mod loops;
+pub(crate) use loops::INLINE_LOOP_QUANTUM;
 mod mem;
 mod moves;
 mod regs;
@@ -350,6 +351,10 @@ pub struct Emitter<'a> {
     /// start+8 vs start+7 for movec ssh,rN). Set around the affected
     /// read, reset to 0 afterwards.
     fault_anchor_bump: u32,
+    /// Cycles an inline loop may run in one block dispatch before it bails
+    /// to the run loop (see `emit_loop_preemption_check`). Fixed for the
+    /// engine that built this emitter; only the differential tests move it.
+    loop_quantum: i32,
 }
 
 impl<'a> Emitter<'a> {
@@ -437,7 +442,14 @@ impl<'a> Emitter<'a> {
             cur_inst_len: 0,
             cur_decode_len: 1,
             fault_anchor_bump: 0,
+            loop_quantum: loops::INLINE_LOOP_QUANTUM,
         }
+    }
+
+    /// Override the inline-loop preemption quantum for this block. Set from
+    /// the engine before emission; see `JitEngine::set_inline_loop_quantum`.
+    pub fn set_loop_quantum(&mut self, cycles: i32) {
+        self.loop_quantum = cycles;
     }
 
     /// Spill the fault shadow BUDGET for the instruction being emitted to

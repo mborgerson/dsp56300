@@ -99,6 +99,10 @@ pub struct JitEngine {
     translations: HashMap<(u32, u32), Vec<(Box<[u32]>, CompiledFn)>>,
     /// Total candidates held, so the cache can be bounded.
     translation_count: usize,
+    /// Inline-loop preemption quantum baked into the blocks this engine
+    /// compiles. A property of the engine, never of a run() call - see
+    /// `emit_loop_preemption_check`.
+    loop_quantum: i32,
     /// Instruction cap for the blocks this engine compiles. `MAX_BLOCK_LEN`
     /// except in the bench that measures what the cap costs.
     max_block_len: u32,
@@ -172,6 +176,7 @@ impl JitEngine {
             block_profile: None,
             translations: HashMap::new(),
             translation_count: 0,
+            loop_quantum: crate::emit::INLINE_LOOP_QUANTUM,
             max_block_len: MAX_BLOCK_LEN,
             stats: JitStats::default(),
         }
@@ -238,6 +243,18 @@ impl JitEngine {
                     .map(|b| (pc as u32, b.end_pc, b.end_pc - pc as u32))
             })
             .collect()
+    }
+
+    /// Set the inline-loop preemption quantum for blocks compiled from here
+    /// on, dropping everything already compiled. Test-only, behind the
+    /// `tunable-loop-quantum` feature: preemption must be a property of the
+    /// guest program, so an embedder never gets to move it. The differential
+    /// tests need two engines that disagree about it in one process.
+    #[cfg(feature = "tunable-loop-quantum")]
+    #[doc(hidden)]
+    pub fn set_inline_loop_quantum(&mut self, cycles: i32) {
+        self.loop_quantum = cycles;
+        self.invalidate_cache();
     }
 
     /// Invalidate all cached blocks and release compiled code memory.
@@ -455,6 +472,7 @@ impl JitEngine {
         {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
+            emitter.set_loop_quantum(self.loop_quantum);
             // Single-instruction functions are cached by opcode and reused
             // at other addresses; fault shadow budgets are opcode
             // properties (no PC involved), so this is cache-safe.
@@ -543,6 +561,7 @@ impl JitEngine {
         {
             let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
             let mut emitter = Emitter::new(builder, self.ptr_ty, map);
+            emitter.set_loop_quantum(self.loop_quantum);
             end_pc = emitter.emit_block(start_pc, self.max_block_len, stop_pc);
             let frontend_config = self.module.as_ref().unwrap().isa().frontend_config();
             emitter.finalize_and_return(frontend_config);
