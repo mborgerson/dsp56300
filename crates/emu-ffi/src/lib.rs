@@ -428,6 +428,59 @@ pub unsafe extern "C" fn dsp56300_write_memory(
     dsp.state.write_memory(s, addr, value);
 }
 
+/// Read `count` consecutive words from DSP memory into `out`.
+///
+/// One call per address run instead of one per word: an embedder's DMA
+/// engine moves hundreds of words per transfer through this boundary, and
+/// the per-word FFI round trip was most of its cost.
+///
+/// # Safety
+/// `dsp` must be a valid pointer to a `DspJit`; `out` must point to at
+/// least `count` writable u32s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dsp56300_read_memory_run(
+    dsp: *const DspJit,
+    space: CMemSpace,
+    addr: u32,
+    out: *mut u32,
+    count: u32,
+) {
+    let dsp = unsafe { &*dsp };
+    let s = space.to_core();
+    for i in 0..count {
+        unsafe { *out.add(i as usize) = dsp.state.read_memory(s, addr + i) };
+    }
+}
+
+/// Write `count` consecutive words to DSP memory from `vals`, marking the
+/// dirty bitmap for changed P words exactly as `dsp56300_write_memory` does.
+///
+/// # Safety
+/// `dsp` must be a valid pointer to a `DspJit`; `vals` must point to at
+/// least `count` readable u32s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dsp56300_write_memory_run(
+    dsp: *mut DspJit,
+    space: CMemSpace,
+    addr: u32,
+    vals: *const u32,
+    count: u32,
+) {
+    let dsp = unsafe { &mut *dsp };
+    let s = space.to_core();
+    for i in 0..count {
+        let value = unsafe { *vals.add(i as usize) };
+        if s == MemSpace::P {
+            let masked = value & 0x00FF_FFFF;
+            let old = dsp.state.map.read_pram(addr + i);
+            if old != masked {
+                dsp.state.pram_dirty.mark_dirty(addr + i);
+            }
+        }
+        dsp.state.write_memory(s, addr + i, value);
+    }
+}
+
 // ================================================================
 // State accessors for sync / engine switching
 // ================================================================
