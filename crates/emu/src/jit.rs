@@ -962,11 +962,27 @@ impl DspState {
         // stream-word budget lasts (branches followed - a jmp in the
         // window executes and the stream continues at its target); the
         // first instruction that would exceed the budget is annulled and
-        // becomes the frame's saved PC (silicon-probed,
-        // VBA-redirect latency/straddle/branch-class probes).
-        if self.interrupts.state == InterruptState::Armed {
+        // becomes the frame's saved PC (silicon-probed).
+        if self.interrupts.state == InterruptState::Armed && !self.loop_rep {
+            // REP locks the fetch stream, so its iterations consume no
+            // shadow words and delivery never lands inside the REP
+            // complex. The complex itself charges two stream words - the
+            // REP and its (necessarily one-word) target, fetched once
+            // whatever the count, zero included - and a complex that does
+            // not fit the remaining window is annulled at the REP. The
+            // retire side (window truncated to at most one more word)
+            // lives in `rep_truncate_armed_window`, with the silicon
+            // observations behind both.
+            let is_rep = matches!(
+                decode::decode(opcode),
+                Instruction::RepImm { .. }
+                    | Instruction::RepReg { .. }
+                    | Instruction::RepAa { .. }
+                    | Instruction::RepEa { .. }
+            );
+            let cost = if is_rep { 2 } else { inst_len };
             let remaining = self.interrupts.fault_budget;
-            if inst_len == 0 || inst_len > remaining {
+            if inst_len == 0 || cost > remaining {
                 self.deliver_armed_fault();
                 // Do NOT run process_pending_interrupts here: delivery
                 // already did the stage-4 work (saved PC, vector fetch,
@@ -981,7 +997,7 @@ impl DspState {
                 self.cycle_count += 2;
                 return 2;
             }
-            self.interrupts.fault_budget = remaining - inst_len;
+            self.interrupts.fault_budget = remaining - cost;
         }
 
         self.pc_advance = inst_len;

@@ -669,6 +669,20 @@ impl DspState {
         self.warned_bits |= new_warnings;
     }
 
+    /// A REP retiring inside an armed core-fault window truncates the
+    /// remaining shadow to at most one more stream word. Silicon (p23
+    /// sweep): with a movec-pop's 7-word window, a REP at
+    /// offset d=0..4 moves the annul to rep+3 (target + one post word
+    /// execute), d=5 keeps the original armer+8 boundary (min wins), and
+    /// a REP standing at the boundary is annulled unexecuted. Iterations
+    /// themselves are free (the fetch stream is locked; see the armed
+    /// gate in step_one) and the count - zero included - does not matter.
+    fn rep_truncate_armed_window(&mut self) {
+        if self.interrupts.state == InterruptState::Armed {
+            self.interrupts.fault_budget = self.interrupts.fault_budget.min(1);
+        }
+    }
+
     /// Post-execution PC update: handles REP iteration, PC advancement,
     /// and DO loop end-of-loop checks.
     pub fn advance_pc(&mut self) {
@@ -683,6 +697,7 @@ impl DspState {
                 } else {
                     self.loop_rep = false;
                     self.registers[reg::LC] = self.registers[reg::TEMP];
+                    self.rep_truncate_armed_window();
                 }
             } else {
                 // First call after REP instruction. REP with LC=0 does not
@@ -694,6 +709,7 @@ impl DspState {
                     self.loop_rep = false;
                     self.registers[reg::LC] = self.registers[reg::TEMP];
                     self.pc_advance += 1;
+                    self.rep_truncate_armed_window();
                 }
                 self.pc_on_rep = false;
             }
