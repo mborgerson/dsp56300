@@ -247,13 +247,14 @@ impl<'a> Emitter<'a> {
         self.set_flags_nz(acc_val);
     }
 
-    /// Immediate EUNZ update via extern helper. Replaces 77 IR instructions
-    /// with a single native function call, dramatically reducing Cranelift
-    /// compilation time while keeping the same runtime semantics.
+    /// Immediate EUNZ update via extern helper. A single native call rather
+    /// than inline IR: a program that pages overlays rebuilds tens of
+    /// thousands of blocks a second, so what a site costs to emit is not a
+    /// rounding error.
     fn update_nz_now(&mut self, acc_val: Value) {
         use crate::core::jit_update_nz;
         let real = jit_update_nz as *const () as usize;
-        self.emit_call_sr_helper_i64(real, acc_val);
+        self.emit_call_sr_helper_pure(real, acc_val);
     }
 
     /// `update_nz_now` unless the caller has established that E/U/N/Z are
