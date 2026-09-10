@@ -2119,8 +2119,10 @@ fn parse_parallel_move<'a>(
         ) {
             return Ok(ParallelMove::LImm { imm, reg: dst });
         }
-        // Force-long (#>): use XYMem with Immediate EA for 24-bit extension word
-        if force_long {
+        // Force-long (#>): use XYMem with Immediate EA for 24-bit extension
+        // word. M/control registers (index >= $20) can't be encoded in the
+        // XYMem register field; ImmToReg routes them through MOVEC.
+        if force_long && dst.index() < 0x20 {
             return Ok(ParallelMove::XYMem {
                 space: MemorySpace::X,
                 ea: EffectiveAddress::Immediate(imm),
@@ -2128,7 +2130,11 @@ fn parse_parallel_move<'a>(
                 write: true,
             });
         }
-        return Ok(ParallelMove::ImmToReg { imm, dst });
+        return Ok(ParallelMove::ImmToReg {
+            imm,
+            dst,
+            force_long,
+        });
     }
 
     // Memory space first: x:/y:/l:

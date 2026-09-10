@@ -647,7 +647,7 @@ fn pmove_ext_size(pmove: &ParallelMove) -> u32 {
                 1 // symbol/expression: assume long form
             }
         }
-        ParallelMove::ImmToReg { imm, dst } => {
+        ParallelMove::ImmToReg { imm, dst, .. } => {
             // Must match the PM3 short-form check in encode_parallel().
             let is_bare_lit = matches!(imm, Expr::Literal(_));
             let is_frac = matches!(imm, Expr::Frac(_));
