@@ -37,3 +37,7 @@ required-features = ["cli"]
 [[bench]]
 name = "jit"
 harness = false
+
+[[bin]]
+name = "difftest"
+path = "src/bin/difftest.rs"
