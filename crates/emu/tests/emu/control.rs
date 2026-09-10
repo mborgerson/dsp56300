@@ -633,9 +633,11 @@ fn test_trap_posts_interrupt() {
     let cycles = run_one(&mut s, &mut jit);
     assert_eq!(cycles, 9, "TRAP should take 9 cycles");
 
-    // Verify interrupt was posted and dispatched
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
-    assert_eq!(s.interrupts.pipeline_stage, 5);
+    // Verify interrupt was posted and Armed with a ZERO stream-word
+    // budget (silicon, probe_trap_vector: no shadow words,
+    // saved PC = F+len)
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
+    assert_eq!(s.interrupts.fault_budget, 0);
 }
 
 #[test]
@@ -676,8 +678,9 @@ fn test_trapcc_taken_posts_interrupt() {
     pram[0] = 0x000010; // trapcc CC
     run_one(&mut s, &mut jit);
 
-    // Verify interrupt was posted
-    assert_eq!(s.interrupts.state, InterruptState::Fast);
+    // Verify interrupt was posted and Armed (budget 0)
+    assert_eq!(s.interrupts.state, InterruptState::Armed);
+    assert_eq!(s.interrupts.fault_budget, 0);
 }
 
 #[test]
@@ -727,8 +730,8 @@ fn test_trapcc_gt_taken() {
 
     assert_eq!(
         s.interrupts.state,
-        InterruptState::Fast,
-        "TRAPgt should post interrupt when GT is true"
+        InterruptState::Armed,
+        "TRAPgt should post interrupt (Armed, budget 0) when GT is true"
     );
 }
 
