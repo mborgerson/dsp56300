@@ -335,6 +335,27 @@ fn test_disasm_jscc_short() {
 // MoveLongDisp (Rn+xxxx addressing)
 
 #[test]
+fn test_disasm_move_y_long_read_mode6_collision() {
+    // 0B70C4 000C08 also matches the jsclr-ea template with MMM=110, but
+    // the mode-6 row belongs to MOVE Y:(Rn+xxxx),D. sim56300 disassembles
+    // it exactly as "move y:(r0+$c08),x0".
+    let (text, len) = disassemble(0, 0x0B70C4, 0x000C08);
+    assert_eq!(len, 2);
+    assert_eq!(text, "move y:(r0+3080),x0");
+}
+
+#[test]
+fn test_disasm_mode6_unallocated_rows_are_dc() {
+    // do/rep/brclr ea templates with MMM=110 are unallocated encodings;
+    // sim56300 disassembles them as data constants.
+    for opc in [0x067040u32, 0x067060, 0x0CB044] {
+        let (text, len) = disassemble(0, opc, 0);
+        assert_eq!(len, 1, "{opc:06X}");
+        assert!(text.starts_with("dc "), "{opc:06X} -> {text}");
+    }
+}
+
+#[test]
 fn test_disasm_move_x_long_read() {
     // 0000101001110RRR1WDDDDDD, R=0, W=1 (read), D=r0 (index 16=0b010000)
     // D bits 5:4 = 01, avoids JclrEa match (requires bits 5:4 = 00)
@@ -522,10 +543,12 @@ fn test_disasm_ea_mode_6_btst() {
 
 #[test]
 fn test_disasm_ea_mode_6_rep() {
-    // RepEa: 0000011001MMMRRR0S100000 with MMM=110, RRR=000, S=0
+    // RepEa: 0000011001MMMRRR0S100000 with MMM=110, RRR=000, S=0.
+    // REP is a single-word instruction with no extension word, so the
+    // mode-6 row is unallocated (sim56300 disassembles it as `dc`).
     let (text, len) = disassemble(0, 0x067020, 0x001234);
-    assert_eq!(text, "rep x:$1234");
-    assert_eq!(len, 2);
+    assert_eq!(text, "dc $067020");
+    assert_eq!(len, 1);
 }
 
 #[test]

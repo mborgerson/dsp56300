@@ -18,6 +18,18 @@ struct OpcodeEntry {
     /// Whether this entry needs MMMRRR addressing mode validation.
     /// Auto-detected from the presence of 'M' in the template string.
     has_mmmrrr: bool,
+    /// Whether MMM=110 (absolute address / immediate data) is a valid
+    /// encoding for this entry. Instructions whose extension word already
+    /// serves another purpose (bit-test branch targets, DO/DOR loop
+    /// addresses) or that have no extension word (REP) do not own the
+    /// MMM=110 code points: in the jclr/jset/jsclr/jsset rows those bit
+    /// patterns encode MOVE X:/Y:(Rn+xxxx) instead (verified against the
+    /// DSP56300FM opcode tables and Motorola's sim56300), and in the
+    /// brclr/brset/bsclr/bsset/DO/DOR/REP rows they are unallocated
+    /// (sim56300 disassembles them as `dc`). Entries with this flag
+    /// cleared fall through so the colliding instruction (or Unknown)
+    /// decodes instead.
+    mode6_ok: bool,
     /// Decode function: extracts fields and returns Instruction.
     /// `None` means the instruction is recognized but not yet implemented.
     decode: Option<fn(u32) -> Instruction>,
@@ -259,8 +271,16 @@ const fn entry(
         match_val,
         name,
         has_mmmrrr: tmpl_has_mmmrrr(tmpl),
+        mode6_ok: true,
         decode,
     }
+}
+
+/// Mark an entry as not owning the MMM=110 (absolute/immediate) code points
+/// of its MMMRRR field. See [`OpcodeEntry::mode6_ok`].
+const fn no_mode6(mut e: OpcodeEntry) -> OpcodeEntry {
+    e.mode6_ok = false;
+    e
 }
 
 /// Opcode table entry macro. All entries use `op!(template, name, ...)`.
@@ -434,13 +454,13 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("000011010001000011000000", "bra xxxx", BraLong),
         op!("00000101000011aaaa0aaaaa", "bra xxx", |T, opc| Bra { addr: tmpl_sext9(T, opc) }),
         op!("0000110100011RRR11000000", "bra Rn", rn, BraRn),
-        op!("0000110010MMMRRR0S0bbbbb", "brclr #n, [X or Y]:ea, xxxx", bit ea, BrclrEa),
+        no_mode6(op!("0000110010MMMRRR0S0bbbbb", "brclr #n, [X or Y]:ea, xxxx", bit ea, BrclrEa)),
         op!("0000110010aaaaaa1S0bbbbb", "brclr #n, [X or Y]:aa, xxxx", bit aa, BrclrAa),
         op!("0000110011pppppp0S0bbbbb", "brclr #n, [X or Y]:pp, xxxx", bit pp, BrclrPp),
         op!("0000010010qqqqqq0S0bbbbb", "brclr #n, [X or Y]:qq, xxxx", bit qq, BrclrQq),
         op!("0000110011DDDDDD100bbbbb", "brclr #n, S, xxxx", bit reg, BrclrReg),
         op!("00000000000000100001CCCC", "brkcc", cc, Brkcc),
-        op!("0000110010MMMRRR0S1bbbbb", "brset #n, [X or Y]:ea, xxxx", bit ea, BrsetEa),
+        no_mode6(op!("0000110010MMMRRR0S1bbbbb", "brset #n, [X or Y]:ea, xxxx", bit ea, BrsetEa)),
         op!("0000110010aaaaaa1S1bbbbb", "brset #n, [X or Y]:aa, xxxx", bit aa, BrsetAa),
         op!("0000110011pppppp0S1bbbbb", "brset #n, [X or Y]:pp, xxxx", bit pp, BrsetPp),
         op!("0000010010qqqqqq0S1bbbbb", "brset #n, [X or Y]:qq, xxxx", bit qq, BrsetQq),
@@ -448,7 +468,7 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("00001101000100000000CCCC", "bscc xxxx", cc, BsccLong),
         op!("00000101CCCC00aaaa0aaaaa", "bscc xxx", |T, opc| Bscc { cc: tmpl_cc(T, opc), addr: tmpl_sext9(T, opc) }),
         op!("0000110100011RRR0000CCCC", "bscc Rn", cc rn, BsccRn),
-        op!("0000110110MMMRRR0S0bbbbb", "bsclr #n, [X or Y]:ea, xxxx", bit ea, BsclrEa),
+        no_mode6(op!("0000110110MMMRRR0S0bbbbb", "bsclr #n, [X or Y]:ea, xxxx", bit ea, BsclrEa)),
         op!("0000110110aaaaaa1S0bbbbb", "bsclr #n, [X or Y]:aa, xxxx", bit aa, BsclrAa),
         op!("0000010010qqqqqq1S0bbbbb", "bsclr #n, [X or Y]:qq, xxxx", bit qq, BsclrQq),
         op!("0000110111pppppp0S0bbbbb", "bsclr #n, [X or Y]:pp, xxxx", bit pp, BsclrPp),
@@ -461,7 +481,7 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("000011010001000010000000", "bsr xxxx", BsrLong),
         op!("00000101000010aaaa0aaaaa", "bsr xxx", |T, opc| Bsr { addr: tmpl_sext9(T, opc) }),
         op!("0000110100011RRR10000000", "bsr Rn", rn, BsrRn),
-        op!("0000110110MMMRRR0S1bbbbb", "bsset #n, [X or Y]:ea, xxxx", bit ea, BssetEa),
+        no_mode6(op!("0000110110MMMRRR0S1bbbbb", "bsset #n, [X or Y]:ea, xxxx", bit ea, BssetEa)),
         op!("0000110110aaaaaa1S1bbbbb", "bsset #n, [X or Y]:aa, xxxx", bit aa, BssetAa),
         op!("0000110111pppppp0S1bbbbb", "bsset #n, [X or Y]:pp, xxxx", bit pp, BssetPp),
         op!("0000010010qqqqqq1S1bbbbb", "bsset #n, [X or Y]:qq, xxxx", bit qq, BssetQq),
@@ -495,12 +515,12 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
                 None => Instruction::Unknown { opcode: opc },
             }
         }),
-        op!("0000011001MMMRRR0S000000", "do [X or Y]:ea, expr", loop ea, DoEa),
+        no_mode6(op!("0000011001MMMRRR0S000000", "do [X or Y]:ea, expr", loop ea, DoEa)),
         op!("0000011000aaaaaa0S000000", "do [X or Y]:aa, expr", loop aa, DoAa),
         op!("00000110iiiiiiii1000hhhh", "do #xxx, expr", loop imm, DoImm),
         op!("0000011011DDDDDD00000000", "do S, expr", loop reg, DoReg, b'D'),
         op!("000000000000001000000011", "do forever, expr", fn |_| Instruction::DoForever),
-        op!("0000011001MMMRRR0S010000", "dor [X or Y]:ea, label", loop ea, DorEa),
+        no_mode6(op!("0000011001MMMRRR0S010000", "dor [X or Y]:ea, label", loop ea, DorEa)),
         op!("0000011000aaaaaa0S010000", "dor [X or Y]:aa, label", loop aa, DorAa),
         op!("00000110iiiiiiii1001hhhh", "dor #xxx, label", loop imm, DorImm),
         op!("0000011011DDDDDD00010000", "dor S, label", loop reg, DorReg, b'D'),
@@ -538,7 +558,7 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         }),
         op!("00001110CCCCaaaaaaaaaaaa", "jcc xxx", |T, opc| Jcc { cc: tmpl_cc(T, opc), addr: tmpl_field(T, b'a', opc) }),
         op!("0000101011MMMRRR1010CCCC", "jcc ea", cc ea, JccEa),
-        op!("0000101001MMMRRR1S00bbbb", "jclr #n, [X or Y]:ea, xxxx", bit ea, JclrEa),
+        no_mode6(op!("0000101001MMMRRR1S00bbbb", "jclr #n, [X or Y]:ea, xxxx", bit ea, JclrEa)),
         op!("0000101000aaaaaa1S00bbbb", "jclr #n, [X or Y]:aa, xxxx", bit aa, JclrAa),
         op!("0000101010pppppp1S00bbbb", "jclr #n, [X or Y]:pp, xxxx", bit pp, JclrPp),
         op!("0000000110qqqqqq1S00bbbb", "jclr #n, [X or Y]:qq, xxxx", bit qq, JclrQq),
@@ -547,19 +567,19 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("000011000000aaaaaaaaaaaa", "jmp xxx", |T, opc| Jmp { addr: tmpl_field(T, b'a', opc) }),
         op!("00001111CCCCaaaaaaaaaaaa", "jscc xxx", |T, opc| Jscc { cc: tmpl_cc(T, opc), addr: tmpl_field(T, b'a', opc) }),
         op!("0000101111MMMRRR1010CCCC", "jscc ea", cc ea, JsccEa),
-        op!("0000101101MMMRRR1S00bbbb", "jsclr #n, [X or Y]:ea, xxxx", bit ea, JsclrEa),
+        no_mode6(op!("0000101101MMMRRR1S00bbbb", "jsclr #n, [X or Y]:ea, xxxx", bit ea, JsclrEa)),
         op!("0000101100aaaaaa1S00bbbb", "jsclr #n, [X or Y]:aa, xxxx", bit aa, JsclrAa),
         op!("0000101110pppppp1S0bbbbb", "jsclr #n, [X or Y]:pp, xxxx", bit pp, JsclrPp),
         op!("0000000111qqqqqq1S0bbbbb", "jsclr #n, [X or Y]:qq, xxxx", bit qq, JsclrQq),
         op!("0000101111DDDDDD000bbbbb", "jsclr #n, S, xxxx", bit reg, JsclrReg),
-        op!("0000101001MMMRRR1S10bbbb", "jset #n, [X or Y]:ea, xxxx", bit ea, JsetEa),
+        no_mode6(op!("0000101001MMMRRR1S10bbbb", "jset #n, [X or Y]:ea, xxxx", bit ea, JsetEa)),
         op!("0000101000aaaaaa1S10bbbb", "jset #n, [X or Y]:aa, xxxx", bit aa, JsetAa),
         op!("0000101010pppppp1S10bbbb", "jset #n, [X or Y]:pp, xxxx", bit pp, JsetPp),
         op!("0000000110qqqqqq1S10bbbb", "jset #n, [X or Y]:qq, xxxx", bit qq, JsetQq),
         op!("0000101011DDDDDD0010bbbb", "jset #n, S, xxxx", bit reg, JsetReg),
         op!("0000101111MMMRRR10000000", "jsr ea", ea, JsrEa),
         op!("000011010000aaaaaaaaaaaa", "jsr xxx", |T, opc| Jsr { addr: tmpl_field(T, b'a', opc) }),
-        op!("0000101101MMMRRR1S10bbbb", "jsset #n, [X or Y]:ea, xxxx", bit ea, JssetEa),
+        no_mode6(op!("0000101101MMMRRR1S10bbbb", "jsset #n, [X or Y]:ea, xxxx", bit ea, JssetEa)),
         op!("0000101100aaaaaa1S10bbbb", "jsset #n, [X or Y]:aa, xxxx", bit aa, JssetAa),
         op!("0000101110pppppp1S1bbbbb", "jsset #n, [X or Y]:pp, xxxx", bit pp, JssetPp),
         op!("0000000111qqqqqq1S1bbbbb", "jsset #n, [X or Y]:qq, xxxx", bit qq, JssetQq),
@@ -627,7 +647,7 @@ const OPCODE_TABLE: [OpcodeEntry; 185] = [
         op!("000000000000000000001111", "plockr xxxx", Plockr),
         op!("0000101011MMMRRR10000001", "punlock ea", ea, PunlockEa),
         op!("000000000000000000001110", "punlockr xxxx", Punlockr),
-        op!("0000011001MMMRRR0S100000", "rep [X or Y]:ea", loop ea, RepEa),
+        no_mode6(op!("0000011001MMMRRR0S100000", "rep [X or Y]:ea", loop ea, RepEa)),
         op!("0000011000aaaaaa0S100000", "rep [X or Y]:aa", loop aa, RepAa),
         op!("00000110iiiiiiii1010hhhh", "rep #xxx", loop imm, RepImm),
         op!("0000011011dddddd00100000", "rep S", loop reg, RepReg, b'd'),
@@ -901,9 +921,15 @@ pub fn decode(opcode: u32) -> Instruction {
     while i < bucket.len as usize {
         let entry = &OPCODE_TABLE[bucket.indices[i] as usize];
         if (opcode & entry.mask) == entry.match_val {
-            if entry.has_mmmrrr && !match_mmmrrr(opcode) {
-                i += 1;
-                continue;
+            if entry.has_mmmrrr {
+                // Entries that don't own the MMM=110 code points fall
+                // through so the colliding encoding decodes instead
+                // (e.g. jsclr-ea row MMM=110 is MOVE Y:(Rn+xxxx),D).
+                let mode6 = (opcode >> 11) & 0x7 == 0x6;
+                if (mode6 && !entry.mode6_ok) || !match_mmmrrr(opcode) {
+                    i += 1;
+                    continue;
+                }
             }
             return match entry.decode {
                 Some(f) => {

@@ -8,6 +8,7 @@ impl<'a> Emitter<'a> {
         self.pending_flags = Some(flags);
     }
 
+    /// Materialize the pending flags.
     pub(super) fn flush_pending_flags(&mut self) {
         let Some(flags) = self.pending_flags.take() else {
             return;
@@ -221,7 +222,8 @@ impl<'a> Emitter<'a> {
     /// compilation time while keeping the same runtime semantics.
     fn update_nz_now(&mut self, acc_val: Value) {
         use crate::core::jit_update_nz;
-        self.emit_call_sr_helper_i64(jit_update_nz as *const () as usize, acc_val);
+        let real = jit_update_nz as *const () as usize;
+        self.emit_call_sr_helper_i64(real, acc_val);
     }
 
     /// Update CCR flags for logical operations (AND, OR, EOR, NOT).

@@ -1560,7 +1560,7 @@ fn test_jset_aa() {
 }
 
 #[test]
-fn test_jclr_aa_promotes_to_ea() {
+fn test_jclr_aa_range() {
     // Address $3F is max for 6-bit aa mode
     let r = assemble_line("jclr #0,x:$003f,p:$003f", 0).unwrap();
     assert!(r.word1.is_some()); // always 2-word
@@ -1568,11 +1568,16 @@ fn test_jclr_aa_promotes_to_ea() {
     let (d, _) = dsp56300_disasm::disassemble(0, r.word0, r.word1.unwrap());
     assert_eq!(d, "jclr #0,x:$003f,$003f");
 
-    // Address $40 exceeds aa range; promotes to EA when addr == target
-    roundtrip("jclr #0,x:$0040,$0040", 0);
-    roundtrip("jsclr #14,y:$0053,$0053", 0);
-    roundtrip("jset #5,x:$0080,$0080", 0);
-    roundtrip("jsset #7,y:$006e,$006e", 0);
+    // Addresses beyond aa range have no encoding: the mode-6 code points
+    // of these rows belong to MOVE X:/Y:(Rn+xxxx). The official assembler
+    // errors with "Absolute address must be either short or I/O short".
+    assert!(assemble_line("jclr #0,x:$0040,$0040", 0).is_err());
+    assert!(assemble_line("jsclr #14,y:$0053,$0053", 0).is_err());
+    assert!(assemble_line("jset #5,x:$0080,$0080", 0).is_err());
+    assert!(assemble_line("jsset #7,y:$006e,$006e", 0).is_err());
+    assert!(assemble_line("brclr #4,y:$0c08,$0010", 0).is_err());
+    assert!(assemble_line("do y:$0c08,$0010", 0).is_err());
+    assert!(assemble_line("rep y:$0c08", 0).is_err());
 }
 
 #[test]
@@ -1664,13 +1669,13 @@ fn test_dor_aa_rejects_large_addr() {
 }
 
 #[test]
-fn test_rep_aa_promotes_to_ea() {
+fn test_rep_aa_rejects_large_addr() {
     // $003f fits in aa range (1-word)
     let r = assemble_line("rep x:$003f", 0).unwrap();
     assert!(r.word1.is_none());
-    // $0040 exceeds aa range, promotes to ea absolute (2-word)
-    let r = assemble_line("rep x:$0040", 0).unwrap();
-    assert_eq!(r.word1, Some(0x000040));
+    // $0040 exceeds aa range; REP is single-word, so there is no
+    // absolute-long form to promote to (the mode-6 row is unallocated).
+    assert!(assemble_line("rep x:$0040", 0).is_err());
 }
 
 #[test]
@@ -3264,10 +3269,11 @@ fn test_btst_abs_addr() {
     );
 }
 
-// 1d: BitTarget::Ea with absolute address in jclr
+// 1d: BitTarget with an absolute address beyond aa range in jclr: no
+// encoding exists (the mode-6 row belongs to MOVE X:/Y:(Rn+xxxx)).
 #[test]
 fn test_jclr_abs_addr() {
-    roundtrip("jclr #0,x:$0040,$0040", 0);
+    assert!(assemble_line("jclr #0,x:$0040,$0040", 0).is_err());
 }
 
 // 1e: Movec with absolute address EA, movem with absolute address
@@ -3662,11 +3668,13 @@ fn test_brset_abs_addr() {
     roundtrip("brset #0,y:$0020,$000010", 0);
 }
 
-// Bit branch with ea target
+// Bit branch with ea target: no absolute-long form exists (the mode-6 row
+// belongs to MOVE X:/Y:(Rn+xxxx)); register-indirect ea still works.
 #[test]
-fn test_jset_ea_abs() {
-    // jset with an absolute address for the bit target (large addr -> ea form)
-    roundtrip("jset #5,x:$0040,$0040", 0);
+fn test_jset_ea_abs_rejected() {
+    assert!(assemble_line("jset #5,x:$0040,$0040", 0).is_err());
+    assert!(assemble_line("jset #5,x:>$0c08,$1234", 0).is_err());
+    roundtrip("jset #5,x:(r2)+,$1234", 0);
 }
 
 // Parallel move: Y memory immediate in RegYImm
