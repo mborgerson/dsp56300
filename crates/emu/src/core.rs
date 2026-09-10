@@ -912,10 +912,17 @@ impl DspState {
 
         r_reg = r_reg.wrapping_add(modifier);
 
+        // Wrap correction is direction-gated on silicon: an ADD corrects
+        // only past the high bound, a SUBTRACT only below the low bound.
+        // With the pointer starting OUTSIDE the buffer (offset >= modulo,
+        // possible for non-power-of-2 moduli), a decrement that stays
+        // >= lobound is plain arithmetic - silicon does NOT re-normalize
+        // it into the buffer (probed: M=5, r=$0247: (r)+ -> $0242 but
+        // (r)- -> $0246).
         if orig_modifier != (modulo as i32) {
-            if r_reg > (hibound as i32) {
+            if modifier > 0 && r_reg > (hibound as i32) {
                 r_reg = r_reg.wrapping_sub(modulo as i32);
-            } else if r_reg < (lobound as i32) {
+            } else if modifier < 0 && r_reg < (lobound as i32) {
                 r_reg = r_reg.wrapping_add(modulo as i32);
             }
         }
