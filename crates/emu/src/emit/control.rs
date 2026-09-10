@@ -595,7 +595,9 @@ impl<'a> Emitter<'a> {
         // Save accumulators and SR before ALU op
         let save_a = self.load_acc(Accumulator::A);
         let save_b = self.load_acc(Accumulator::B);
-        let save_sr = self.load_reg(reg::SR);
+        // Snapshot for the splice below - never observed, only written
+        // back into SR - so deferral-transparent.
+        let save_sr = self.load_sr_transparent();
 
         // Execute ALU op (unconditionally -- modifies accumulators and flags)
         self.emit_parallel_alu(alu);
@@ -606,7 +608,7 @@ impl<'a> Emitter<'a> {
             // IFcc.U: conditionally update CCR. Loading SR materializes
             // the ALU op's pending flags (and consumes its SM marker)
             // before the select.
-            let post_sr = self.load_reg(reg::SR);
+            let post_sr = self.load_sr_transparent();
             let sr_result = self.builder.ins().select(cond, post_sr, save_sr);
             self.store_reg(reg::SR, sr_result);
         } else {

@@ -8,8 +8,8 @@ impl<'a> Emitter<'a> {
         self.set_cycles(3);
         match dest {
             0 => {
-                // AND with MR (SR bits 15:8)
-                let sr_val = self.load_reg(reg::SR);
+                // AND with MR (SR bits 15:8) - transparent RMW
+                let sr_val = self.load_sr_transparent();
                 let m = self
                     .builder
                     .ins()
@@ -18,8 +18,8 @@ impl<'a> Emitter<'a> {
                 self.store_reg(reg::SR, r);
             }
             1 => {
-                // AND with CCR (SR bits 7:0)
-                let sr_val = self.load_reg(reg::SR);
+                // AND with CCR (SR bits 7:0) - transparent RMW
+                let sr_val = self.load_sr_transparent();
                 let m = self
                     .builder
                     .ins()
@@ -57,8 +57,8 @@ impl<'a> Emitter<'a> {
         self.set_cycles(3);
         match dest {
             0 => {
-                // OR with MR (SR bits 15:8)
-                let sr_val = self.load_reg(reg::SR);
+                // OR with MR (SR bits 15:8) - transparent RMW
+                let sr_val = self.load_sr_transparent();
                 let bits = self
                     .builder
                     .ins()
@@ -67,8 +67,8 @@ impl<'a> Emitter<'a> {
                 self.store_reg(reg::SR, r);
             }
             1 => {
-                // OR with CCR (SR bits 7:0)
-                let sr_val = self.load_reg(reg::SR);
+                // OR with CCR (SR bits 7:0) - transparent RMW
+                let sr_val = self.load_sr_transparent();
                 let bits = self.builder.ins().iconst(types::I32, imm as i64);
                 let r = self.builder.ins().bor(sr_val, bits);
                 self.store_reg(reg::SR, r);
@@ -190,8 +190,8 @@ impl<'a> Emitter<'a> {
         let one = self.builder.ins().iconst(types::I32, 1);
         // New carry = old bit 0 (bit shifted out right)
         let new_carry = self.builder.ins().band(val, one);
-        // Old carry from SR (bit 0)
-        let sr_val = self.load_reg(reg::SR);
+        // Old carry from SR (bit 0) - deferral-transparent SR read
+        let sr_val = self.load_sr_transparent();
         let old_carry = self.builder.ins().band(sr_val, one);
         // Shift right by 1, put old carry into bit 23
         let shifted = self.builder.ins().ushr(val, one);
@@ -212,8 +212,8 @@ impl<'a> Emitter<'a> {
         // New carry = old bit 23
         let new_carry = self.builder.ins().ushr(val, c23);
         let new_carry = self.builder.ins().band(new_carry, one);
-        // Old carry from SR (bit 0)
-        let sr_val = self.load_reg(reg::SR);
+        // Old carry from SR (bit 0) - deferral-transparent SR read
+        let sr_val = self.load_sr_transparent();
         let old_carry = self.builder.ins().band(sr_val, one);
         // Shift left by 1, put old carry into bit 0
         let shifted = self.builder.ins().ishl(val, one);

@@ -380,6 +380,11 @@ pub struct Emitter<'a> {
     /// SR loads are internal read-modify-writes of bits the deferral either
     /// materializes itself or leaves untouched, not hazards.
     pub(crate) in_flag_flush: bool,
+    /// True while `load_sr_transparent` is loading SR: the consumer
+    /// provably cannot observe the E/U/N/Z quarter and the value never
+    /// escapes SR's own read-modify-write, so the read is not a
+    /// backedge-deferral hazard.
+    pub(crate) sr_read_transparent: bool,
     /// `sm_needs_sat_var` as it stood when `pending_flags` was recorded.
     /// Snapshotting it there frees `emit_saturate_sm` from having to
     /// materialize the previous instruction's computation before it may
@@ -490,6 +495,7 @@ impl<'a> Emitter<'a> {
             cond_keep_flags: 0,
             defer_hazard_sites: 0,
             in_flag_flush: false,
+            sr_read_transparent: false,
             pending_sm_marker: None,
             cur_inst_pc: 0,
             cur_inst_len: 0,
@@ -1970,7 +1976,11 @@ impl<'a> Emitter<'a> {
 
     /// Evaluate condition code, returning i32 (1=true, 0=false).
     fn eval_cc(&mut self, cc: CondCode) -> Value {
-        let sr_val = self.load_reg(reg::SR);
+        // Carry/limit codes read only C and L - deferral-transparent.
+        let sr_val = match cc {
+            CondCode::CC | CondCode::CS | CondCode::LC | CondCode::LS => self.load_sr_transparent(),
+            _ => self.load_reg(reg::SR),
+        };
         let one = self.builder.ins().iconst(types::I32, 1);
 
         match cc {

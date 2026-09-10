@@ -358,8 +358,8 @@ impl<'a> Emitter<'a> {
     fn emit_alu_adc_sbc(&mut self, hi_reg: usize, lo_reg: usize, d: Accumulator, is_sub: bool) {
         let src56 = self.load_xy_as_acc56(hi_reg, lo_reg);
         let dst = self.load_acc(d);
-        // Read current carry
-        let sr_val = self.load_reg(reg::SR);
+        // Read current carry - deferral-transparent SR read
+        let sr_val = self.load_sr_transparent();
         let one32 = self.builder.ins().iconst(types::I32, 1);
         let cur_carry = self.builder.ins().band(sr_val, one32); // C is bit 0
         let cur_carry64 = self.builder.ins().uextend(types::I64, cur_carry);
@@ -416,7 +416,8 @@ impl<'a> Emitter<'a> {
         // Add rounding constant, then apply convergent rounding, then truncate
         // lower bits.
         let acc = self.load_acc(d);
-        let sr_val = self.load_reg(reg::SR);
+        // Reads only S0/S1/RM - deferral-transparent SR read
+        let sr_val = self.load_sr_transparent();
         let s0_mask = self.builder.ins().iconst(types::I32, 1i64 << sr::S0);
         let s1_mask = self.builder.ins().iconst(types::I32, 1i64 << sr::S1);
         let zero32 = self.builder.ins().iconst(types::I32, 0);
@@ -1401,8 +1402,8 @@ impl<'a> Emitter<'a> {
             .select(signs_differ, add_result, sub_result);
         let result_m = self.mask56(result);
 
-        // Set A0 bit 0 = old carry
-        let sr = self.load_reg(reg::SR);
+        // Set A0 bit 0 = old carry - deferral-transparent SR read
+        let sr = self.load_sr_transparent();
         let old_carry = self.extract_bit(sr, sr::C);
         let old_carry64 = self.builder.ins().uextend(types::I64, old_carry);
         let result_m = self.builder.ins().bor(result_m, old_carry64);

@@ -469,6 +469,7 @@ impl<'a> Emitter<'a> {
             .brif(faulted, fault_bail, &[], no_fault, &[]);
         self.builder.switch_to_block(fault_bail);
         self.builder.seal_block(fault_bail);
+        // Loop machinery's own spill - see emit_loop_preemption_check.
         self.flush_all_to_memory();
         let resume = self.builder.ins().iconst(types::I32, (do_pc + 2) as i64);
         self.store_pc(resume);
@@ -679,6 +680,8 @@ impl<'a> Emitter<'a> {
         // probe_enddo_underflow). DO-annul pops share this
         // path; their budget is extrapolated from ENDDO (unprobed).
         let (_saved_pc, saved_sr) = self.stack_pop(5);
+        // The LF/FV restore's SR read-modify-write: E/U/N/Z pass through
+        // unobserved. Charge it to its own hazard kind.
         let sr_val = self.load_reg(reg::SR);
         let lf_fv_mask = (1u32 << sr::LF) | (1u32 << sr::FV);
         let mask = self.builder.ins().iconst(types::I32, lf_fv_mask as i64);
@@ -723,6 +726,8 @@ impl<'a> Emitter<'a> {
             .builder
             .ins()
             .iconst(types::I32, mask_pc(ret_pc) as i64);
+        // DO setup's own SR read (stacked to SSL) - charge the hazard to
+        // its own kind so an enclosing loop's gate can name it.
         let sr_val = self.load_reg(reg::SR);
         self.stack_push(ret, sr_val, 3);
         let sr_new = if forever {
