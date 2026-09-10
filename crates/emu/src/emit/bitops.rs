@@ -82,26 +82,37 @@ impl<'a> Emitter<'a> {
         self.set_cycles(2);
         // SSH is special (hardware-verified): BTST reads it like a move
         // source and pops the stack; the modifying ops rewrite the top
-        // stack slot in place without touching SP.
+        // stack slot in place without touching SP. SSL modifying ops
+        // likewise rewrite the top slot in place (hardware-verified
+        // via the stack-walk slot dump: silicon's bchg #0,ssl
+        // residue persists in the slot across pops - a mirror-only store
+        // vanished at the next reload). SP goes through the same helper
+        // as its move path so the SSH/SSL views are recomputed.
         // FULL-accumulator targets (a/b) go through the move path on
         // silicon (hardware-verified): limited (scaled) 24-bit
         // read, RMW on the limited value, sign-extended write-back that
         // clears a0, with L/S updated by the read. Other registers use
         // load_reg/store_reg - no limiting.
         let is_ssh = reg_idx as usize == reg::SSH;
+        let is_ssl = reg_idx as usize == reg::SSL;
+        let is_sp = reg_idx as usize == reg::SP;
         let is_full_acc = reg_idx as usize == reg::A || reg_idx as usize == reg::B;
         let val = if is_ssh && op == BitOp::Test {
             self.emit_call_extern_ret(jit_read_ssh as *const () as usize)
         } else if is_full_acc {
             self.read_reg_for_move(reg_idx as usize)
         } else {
-            // For SSH this reads the top-of-stack mirror, kept coherent by
-            // every push/pop.
+            // For SSH/SSL this reads the top-of-stack mirror, kept
+            // coherent by every push/pop.
             self.load_reg(reg_idx as usize)
         };
         if let Some(result) = self.apply_bit_op(val, bit_num as u32, op) {
             if is_ssh {
                 self.emit_call_extern_val(jit_write_ssh_tos as *const () as usize, result);
+            } else if is_ssl {
+                self.emit_call_extern_val(jit_write_ssl as *const () as usize, result);
+            } else if is_sp {
+                self.emit_call_extern_val(jit_write_sp as *const () as usize, result);
             } else if is_full_acc {
                 self.write_reg_for_move(reg_idx as usize, result);
             } else {
