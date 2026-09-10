@@ -31,7 +31,10 @@ impl<'a> Emitter<'a> {
 
         self.builder.switch_to_block(merge_blk);
         self.builder.seal_block(merge_blk);
-        self.end_conditional_arm(&mut cond_state);
+        // merge_conditional, not end_conditional_arm: the trap arm touches
+        // no promoted registers today, but the merge is what invalidates
+        // arm-modified registers if that changes.
+        self.merge_conditional(&cond_state);
     }
 
     /// Emit IR to post an interrupt (equivalent to `add_interrupt(inter)`).
