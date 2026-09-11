@@ -16,5 +16,5 @@ cc = "1"
 cbindgen = "0.29"
 
 [dependencies]
-dsp56300-core = { version = "0.1.0", path = "../core" }
-dsp56300-emu = { version = "0.1.0", path = "../emu", default-features = false }
+dsp56300-core = { version = "1.0.0", path = "../core" }
+dsp56300-emu = { version = "1.0.0", path = "../emu", default-features = false }

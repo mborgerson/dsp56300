@@ -16,7 +16,7 @@ default = ["cli"]
 cli = ["dep:clap", "dep:owo-colors"]
 
 [dependencies]
-dsp56300-core = { version = "0.1.0", path = "../core" }
+dsp56300-core = { version = "1.0.0", path = "../core" }
 clap = { version = "4", features = ["derive"], optional = true }
 owo-colors = { version = "4", optional = true }
 

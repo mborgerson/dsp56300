@@ -12,7 +12,7 @@ keywords = ["dsp", "dsp56300", "assembler", "emulator", "jit"]
 categories = ["emulators", "compilers"]
 
 [dependencies]
-dsp56300-core = { version = "0.1.0", path = "../core" }
-dsp56300-asm = { version = "0.1.0", path = "../asm", default-features = false }
-dsp56300-disasm = { version = "0.1.0", path = "../disasm", default-features = false }
-dsp56300-emu = { version = "0.1.0", path = "../emu", default-features = false }
+dsp56300-core = { version = "1.0.0", path = "../core" }
+dsp56300-asm = { version = "1.0.0", path = "../asm", default-features = false }
+dsp56300-disasm = { version = "1.0.0", path = "../disasm", default-features = false }
+dsp56300-emu = { version = "1.0.0", path = "../emu", default-features = false }

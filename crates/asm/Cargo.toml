@@ -16,13 +16,13 @@ default = ["cli"]
 cli = ["dep:clap"]
 
 [dependencies]
-dsp56300-core = { version = "0.1.0", path = "../core" }
+dsp56300-core = { version = "1.0.0", path = "../core" }
 logos = "0.16"
 chumsky = "0.13"
 clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]
-dsp56300-disasm = { version = "0.1.0", path = "../disasm", default-features = false }
+dsp56300-disasm = { version = "1.0.0", path = "../disasm", default-features = false }
 rayon = "1"
 
 [[bin]]
